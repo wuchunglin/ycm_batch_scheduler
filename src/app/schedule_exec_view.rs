@@ -134,6 +134,8 @@ impl BatchSchedulerApp {
         }
         for p in &self.programs {
             let pid = p.id.unwrap_or(0);
+            let (field_count, _) = self.prog_stats.get(&pid).copied().unwrap_or((0, 0));
+            let pending = self.program_pending(pid);
             prog_rows = prog_rows.child(
                 h_flex()
                     .w_full()
@@ -149,6 +151,7 @@ impl BatchSchedulerApp {
                     .child(
                         Checkbox::new(SharedString::from(format!("sx-pchk-{pid}")))
                             .checked(self.exec_sel_programs.contains(&pid))
+                            .disabled(pending)
                             .on_click(cx.listener(move |this, checked, window, cx| {
                                 this.toggle_exec_program(pid, *checked, window, cx);
                             })),
@@ -160,7 +163,14 @@ impl BatchSchedulerApp {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(p.job_code.clone()),
                     )
-                    .child(div().flex_1().min_w_0().child(p.job_name.clone())),
+                    .child(div().flex_1().min_w_0().child(p.job_name.clone()))
+                    .child(if pending {
+                        Tag::warning().child("待設定（尚未選好預設輸入值）").into_any_element()
+                    } else if field_count == 0 {
+                        Tag::secondary().child("無參數").into_any_element()
+                    } else {
+                        div().into_any_element()
+                    }),
             );
         }
 
@@ -416,7 +426,32 @@ impl BatchSchedulerApp {
                                         );
                                         return;
                                     }
+                                    if let Some(bad) = this
+                                        .exec_entries
+                                        .iter()
+                                        .find(|e| this.program_pending(e.program_id))
+                                    {
+                                        let code = this
+                                            .programs
+                                            .iter()
+                                            .find(|p| p.id == Some(bad.program_id))
+                                            .map(|p| p.job_code.clone())
+                                            .unwrap_or_else(|| "?".to_string());
+                                        window.push_notification(
+                                            Notification::warning(format!(
+                                                "「{code}」的欄位尚未全部選好預設輸入值，請先到「批次程式新增」設定"
+                                            )),
+                                            cx,
+                                        );
+                                        return;
+                                    }
+                                    // 進入預覽：檢視狀態重置，必須重新檢視每個日期
                                     this.exec_preview_date_idx = 0;
+                                    this.exec_preview_overview = false;
+                                    this.exec_reviewed.clear();
+                                    this.exec_reviewed.insert(0);
+                                    this.exec_console_mode = false;
+                                    this.exec_cal_open = None;
                                     this.active_tab = NavTab::ExecPreview;
                                     cx.notify();
                                 })),
@@ -435,7 +470,8 @@ impl BatchSchedulerApp {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(t)
         };
-        let date_input = |st: &Entity<InputState>| {
+        // 每月日期（非日期欄位）仍用單純輸入框；日期欄位改用附日曆 icon 的 render_date_field
+        let plain_input = |st: &Entity<InputState>| {
             div().w(px(150.)).text_size(px(14.)).child(Input::new(st))
         };
         let mode = self.exec_date_mode;
@@ -474,8 +510,8 @@ impl BatchSchedulerApp {
                     cx.notify();
                 }),
             ))
-            .child(date_input(&self.exec_range_start_input))
-            .child(date_input(&self.exec_range_end_input));
+            .child(self.render_date_field(CalTarget::RangeStart, &self.exec_range_start_input, cx))
+            .child(self.render_date_field(CalTarget::RangeEnd, &self.exec_range_end_input, cx));
 
         // 每周
         let weekday_names = ["一", "二", "三", "四", "五", "六", "日"];
@@ -516,8 +552,8 @@ impl BatchSchedulerApp {
                 cx.notify();
             }),
         ));
-        for st in &self.exec_specific_inputs {
-            specific = specific.child(date_input(st));
+        for (i, st) in self.exec_specific_inputs.iter().enumerate() {
+            specific = specific.child(self.render_date_field(CalTarget::Specific(i), st, cx));
         }
 
         let date_row = h_flex()
@@ -548,7 +584,7 @@ impl BatchSchedulerApp {
                                             cx.notify();
                                         }),
                                     ))
-                                    .child(date_input(&self.exec_monthly_input)),
+                                    .child(plain_input(&self.exec_monthly_input)),
                             )
                             .child(radio_item(
                                 "sx-dm-last",

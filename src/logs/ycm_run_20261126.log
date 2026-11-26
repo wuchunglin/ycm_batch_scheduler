@@ -2,3 +2,14 @@
 [2026-11-26 09:56:01] [INFO] 成功匯入批次程式 [DAV125X]，共解析 0 個欄位！
 [2026-11-26 09:56:03] [INFO] 成功匯入批次程式 [DAV126X]，共解析 0 個欄位！
 [2026-11-26 09:56:07] [INFO] 成功匯入批次程式 [DAV140XJ]，共解析 2 個欄位！
+[2026-11-26 11:31:44] [INFO] 成功匯入批次程式 [DAV030XJ]，共解析 1 個欄位！請於下方為每個欄位選擇預設輸入值，未選完前無法排程
+[2026-11-26 13:28:17] [INFO] [排程] 按下開始執行（預演）：1 個日期 × 1 支程式｜程式：DAV030XJ@13:00｜日期：115/11/27
+[2026-11-26 13:28:17] [INFO] 實體日誌檔路徑：logs/ycm_run_20261126.log | 群組「排程執行（執行清單）」(MULTI 模式)
+[2026-11-26 13:28:17] [STATUS] 啟動瀏覽器 - 以 Windows UI Automation AP 方式啟動 Microsoft Edge
+[2026-11-26 13:28:17] [INFO] 以 Windows UI Automation 模式啟動 Edge（使用一般設定檔）：exe=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
+[2026-11-26 13:28:19] [INFO] 已鎖定 Edge 視窗 (PID=24368, HWND=0xf0572, 標題=還原頁面)
+[2026-11-26 13:28:19] [STATUS] 開啟網址 - 導航至 https://www.nat.fia.gov.tw/ycm/jobExecute/unRegular/getSysData
+[2026-11-26 13:28:19] [INFO] Edge 已開啟網址：https://www.nat.fia.gov.tw/ycm/jobExecute/unRegular/getSysData
+[2026-11-26 13:28:19] [STATUS] 登入檢查 - 等待登入頁 #pin 欄位出現
+[2026-11-26 13:28:20] [DEBUG] 尚未找到 PIN 欄位（0s）：視窗標題='還原頁面', UIA 節點數=13, Document 數=0, Edit 欄位=[]
+[2026-11-26 13:28:25] [DEBUG] 尚未找到 PIN 欄位（5s）：視窗標題='', UIA 節點數=0, Document 數=0, Edit 欄位=[]

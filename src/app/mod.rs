@@ -2,6 +2,7 @@
 
 mod group;
 mod group_setup_view;
+mod date_picker;
 mod group_view;
 mod helpers;
 mod program;
@@ -31,7 +32,7 @@ use gpui_component::{
     input::{Input, InputState},
     notification::Notification,
     tag::Tag,
-    v_flex, Root, WindowExt,
+    v_flex, Disableable, Root, WindowExt,
 };
 use rusqlite::Connection;
 use tokio::sync::mpsc;
@@ -65,6 +66,14 @@ pub enum NavTab {
     ScheduleRule,
     ExecutionRunner,
     Settings,
+}
+
+/// 日曆選擇器對應的日期欄位
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalTarget {
+    RangeStart,
+    RangeEnd,
+    Specific(usize),
 }
 
 /// 欄位明細表中的一列（可直接在表格內編輯欄位名稱、欄位 ID 與預設輸入值）
@@ -187,6 +196,20 @@ pub struct BatchSchedulerApp {
     exec_specific_inputs: Vec<Entity<InputState>>,
     /// 預覽頁目前選取的基準日期（索引，對應產生出的排程日期）
     exec_preview_date_idx: usize,
+    /// 預覽頁是否停在「總覽」頁籤
+    exec_preview_overview: bool,
+    /// 已檢視過的排程日期（索引）；全部檢視後才能「開始執行」
+    exec_reviewed: HashSet<usize>,
+    /// 執行主控台模式（按「開始執行」後顯示，直到使用者返回）
+    exec_console_mode: bool,
+    /// 開始執行時的日期標籤（供主控台頁籤使用）
+    exec_run_dates: Vec<String>,
+    /// 主控台目前頁籤：None = 全部日誌，Some(i) = 第 i 個日期
+    exec_console_tab: Option<usize>,
+    /// 日曆選擇器目前開啟的欄位、顯示的（西元年, 月）
+    exec_cal_open: Option<CalTarget>,
+    exec_cal_ym: (i32, u32),
+    exec_cal_closed_by: Option<(CalTarget, gpui::Point<gpui::Pixels>)>,
 
     // --- Schedule Rule State ---
     available_years: Vec<i32>,

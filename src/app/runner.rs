@@ -73,7 +73,20 @@ impl BatchSchedulerApp {
             self.preview_items.clone()
         };
 
-        let config = BrowserRunnerConfig {
+        let config = self.build_runner_config(cx);
+        let req = ExecutionRequest {
+            config,
+            group,
+            steps,
+            schedule_dates,
+            custom_vars,
+        };
+        self.launch_execution(req, cx);
+    }
+
+    /// 由「設定」頁的輸入框組出瀏覽器執行設定
+    pub(super) fn build_runner_config(&self, cx: &Context<Self>) -> BrowserRunnerConfig {
+        BrowserRunnerConfig {
             edge_path: self.cfg_edge_path_input.read(cx).value().trim().to_string(),
             target_url: self.cfg_target_url_input.read(cx).value().trim().to_string(),
             pin: self.cfg_pin_input.read(cx).value().trim().to_string(),
@@ -91,22 +104,21 @@ impl BatchSchedulerApp {
                 .parse()
                 .unwrap_or(30),
             dry_run: self.runner_dry_run,
-        };
+        }
+    }
 
+    /// 啟動背景執行並持續把事件（日誌、進度）接回畫面；日誌同時寫入 logs/ycm_run_日期.log
+    pub(super) fn launch_execution(&mut self, req: ExecutionRequest, cx: &mut Context<Self>) {
+        let steps_per_date = req.steps.len();
+        let total = req.schedule_dates.len() * steps_per_date;
         self.runner_state.is_running = true;
+        self.runner_state.failed = false;
         self.runner_state.captured_sns.clear();
-        self.runner_state.logs.clear();
-        self.runner_state.progress = (0, schedule_dates.len() * steps.len());
+        self.runner_state.reset_logs();
+        self.runner_state.steps_per_date = steps_per_date;
+        self.runner_state.progress = (0, total);
         self.runner_state.current_step = "啟動中...".to_string();
         cx.notify();
-
-        let req = ExecutionRequest {
-            config,
-            group,
-            steps,
-            schedule_dates,
-            custom_vars,
-        };
 
         let (tx, mut rx) = mpsc::unbounded_channel::<RunnerEvent>();
         self.tokio_rt.spawn(async move {
@@ -155,6 +167,7 @@ impl BatchSchedulerApp {
         })
         .detach();
     }
+
 
     pub(super) fn build_resolver(&self, cx: &Context<Self>) -> ParamResolver {
         let date_str = self.tester_date_input.read(cx).value().to_string();
@@ -211,7 +224,7 @@ impl BatchSchedulerApp {
                             .items_center()
                             .child(
                                 Checkbox::new("chk-dry-run")
-                                    .label("預演模式 (Dry-Run，不啟動瀏覽器)")
+                                    .label("預演模式")
                                     .checked(self.runner_dry_run)
                                     .on_click(cx.listener(|this, chk, _, cx| {
                                         this.runner_dry_run = *chk;

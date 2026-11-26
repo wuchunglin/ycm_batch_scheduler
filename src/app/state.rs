@@ -1,6 +1,7 @@
 //! 狀態初始化、資料重新載入與選取邏輯
 
 use super::*;
+use chrono::Datelike;
 
 impl BatchSchedulerApp {
     pub fn new(
@@ -86,6 +87,14 @@ impl BatchSchedulerApp {
                 .new(|cx| InputState::new(window, cx).placeholder("每月日期")),
             exec_weekdays: [false; 7],
             exec_preview_date_idx: 0,
+            exec_preview_overview: false,
+            exec_reviewed: HashSet::new(),
+            exec_console_mode: false,
+            exec_run_dates: Vec::new(),
+            exec_console_tab: None,
+            exec_cal_open: None,
+            exec_cal_ym: (Local::now().date_naive().year(), Local::now().date_naive().month()),
+            exec_cal_closed_by: None,
             exec_specific_inputs: (0..5)
                 .map(|_| {
                     cx.new(|cx| InputState::new(window, cx).placeholder("YYY/MM/DD"))
@@ -336,6 +345,12 @@ impl BatchSchedulerApp {
         id.and_then(|i| self.default_values.iter().find(|d| d.id == Some(i)))
             .map(|d| d.name.clone())
             .unwrap_or_else(|| "(未設定)".to_string())
+    }
+
+    /// 程式有欄位、但尚未全部選好預設輸入值 → 「待設定」，不可排程
+    pub(super) fn program_pending(&self, pid: i64) -> bool {
+        let (fields, done) = self.prog_stats.get(&pid).copied().unwrap_or((0, 0));
+        fields > 0 && done < fields
     }
 
     pub(super) fn refresh_prog_stats(&mut self) {

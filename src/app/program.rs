@@ -63,9 +63,13 @@ impl BatchSchedulerApp {
                             drop(guard);
                             self.reload_programs(cx);
                             self.fill_program_inputs(window, cx);
-                            let ok_msg = format!(
-                                "成功匯入批次程式 [{job_code}]，共解析 {field_count} 個欄位！"
-                            );
+                            let ok_msg = if field_count > 0 {
+                                format!(
+                                    "成功匯入批次程式 [{job_code}]，共解析 {field_count} 個欄位！請於下方為每個欄位選擇預設輸入值，未選完前無法排程"
+                                )
+                            } else {
+                                format!("成功匯入批次程式 [{job_code}]（無參數）")
+                            };
                             append_file_log("INFO", &ok_msg);
                             window.push_notification(Notification::success(ok_msg), cx);
                         }
@@ -191,6 +195,19 @@ impl BatchSchedulerApp {
             window.push_notification(Notification::error("請先選取批次程式"), cx);
             return;
         }
+        // 有參數一定要選預設輸入值：前面的列沒選完，不能再新增下一列
+        if let Some(pos) = self.field_rows.iter().position(|r| r.default_id.is_none()) {
+            let label = self.field_rows[pos].label_input.read(cx).value().trim().to_string();
+            let shown = if label.is_empty() { String::new() } else { format!("「{label}」") };
+            window.push_notification(
+                Notification::warning(format!(
+                    "請先為第 {} 列欄位{shown}選擇預設輸入值，再新增下一個欄位",
+                    pos + 1
+                )),
+                cx,
+            );
+            return;
+        }
         let label_input = cx.new(|cx| InputState::new(window, cx).placeholder("欄位名稱"));
         let id_input = cx.new(|cx| InputState::new(window, cx).placeholder("欄位 ID"));
         self.field_rows.push(FieldRow {
@@ -256,6 +273,25 @@ impl BatchSchedulerApp {
             if !seen_ids.insert(html_id.clone()) {
                 window.push_notification(
                     Notification::error(format!("欄位 ID 重複：{html_id}（第 {n} 列）")),
+                    cx,
+                );
+                return;
+            }
+        }
+
+        // 有參數一定要選預設輸入值，否則不能儲存（單列修改只檢查該列）
+        for (i, (_, label, _, default_id)) in entries.iter().enumerate() {
+            if let Some(o) = only {
+                if o != i {
+                    continue;
+                }
+            }
+            if default_id.is_none() {
+                window.push_notification(
+                    Notification::error(format!(
+                        "第 {} 列欄位「{label}」尚未選擇預設輸入值，請選擇後再儲存",
+                        i + 1
+                    )),
                     cx,
                 );
                 return;
@@ -426,10 +462,12 @@ impl BatchSchedulerApp {
             let complete = field_count > 0 && default_count == field_count;
             let p_select = p.clone();
             let p_delete = p.clone();
-            let status_tag = if complete {
+            let status_tag = if field_count == 0 {
+                Tag::secondary().child("無參數")
+            } else if complete {
                 Tag::primary().child(format!("{default_count} / {field_count} 完成"))
             } else {
-                Tag::secondary().child(format!("{default_count} / {field_count}"))
+                Tag::warning().child(format!("待設定 {default_count} / {field_count}"))
             };
 
             if is_narrow {
@@ -577,7 +615,7 @@ impl BatchSchedulerApp {
                     .p_3()
                     .text_sm()
                     .text_color(MUTED_FOREGROUND)
-                    .child("此程式尚無輸入欄位，可按「＋ 新增欄位」或匯入 HTML 帶入"),
+                    .child("此程式無參數（若有輸入欄位，可按「＋ 新增欄位」或匯入 HTML 帶入）"),
             );
         }
         for (i, row) in self.field_rows.iter().enumerate() {
@@ -593,7 +631,13 @@ impl BatchSchedulerApp {
                     .justify_between()
                     .bg(BACKGROUND)
                     .border_1()
-                    .border_color(if picker_open { PRIMARY } else { BORDER })
+                    .border_color(if picker_open {
+                        PRIMARY
+                    } else if row.default_id.is_none() {
+                        DANGER
+                    } else {
+                        BORDER
+                    })
                     .rounded_md()
                     .cursor_pointer()
                     .on_mouse_down(
@@ -617,7 +661,16 @@ impl BatchSchedulerApp {
                             cx.notify();
                         }),
                     )
-                    .child(div().text_sm().child(def_label))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(if row.default_id.is_none() { DANGER } else { FOREGROUND })
+                            .child(if row.default_id.is_none() {
+                                "請選擇預設輸入值".to_string()
+                            } else {
+                                def_label
+                            }),
+                    )
                     .child(div().text_xs().text_color(MUTED_FOREGROUND).child("▼"));
 
                 let mut cell = div().relative().w_full().child(trigger);
@@ -652,18 +705,6 @@ impl BatchSchedulerApp {
                                 cx.notify();
                             }
                         }));
-                    menu = menu.child(dropdown_item(
-                        SharedString::from(format!("pk-{i}-none")),
-                        "(未設定)",
-                        row.default_id.is_none(),
-                        cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            if let Some(r) = this.field_rows.get_mut(i) {
-                                r.default_id = None;
-                            }
-                            this.open_picker = None;
-                            cx.notify();
-                        }),
-                    ));
                     for d in &self.default_values {
                         let did = d.id;
                         menu = menu.child(dropdown_item(
@@ -839,7 +880,7 @@ impl BatchSchedulerApp {
                         div()
                             .text_sm()
                             .text_color(MUTED_FOREGROUND)
-                            .child("上方維護程式，選一支程式後，下方逐欄位選擇預設輸入值。"),
+                            .child("上方維護程式，選一支程式後，下方逐欄位選擇預設輸入值；有參數的欄位一定要選好預設輸入值才能儲存。"),
                     ),
             )
             // 工作代號 / 工作名稱 + 新增 修改 匯入

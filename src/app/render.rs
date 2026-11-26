@@ -12,6 +12,9 @@ impl Render for BatchSchedulerApp {
         let active = self.active_tab;
         let viewport_w = window.viewport_size().width;
         let is_narrow = viewport_w < px(860.);
+        // 執行排程期間鎖住所有頁籤，必須執行完成才能切換
+        let locked = self.runner_state.is_running;
+        let pad = if is_narrow { px(16.) } else { px(24.) };
 
         v_flex()
             .size_full()
@@ -96,7 +99,12 @@ impl Render for BatchSchedulerApp {
                                 "nav-prog",
                                 "批次程式新增",
                                 active == NavTab::ProgramManager,
+                                locked,
                                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    if this.runner_state.is_running {
+                                        return;
+                                    }
+                                    this.exec_console_mode = false;
                                     this.active_tab = NavTab::ProgramManager;
                                     cx.notify();
                                 }),
@@ -105,7 +113,12 @@ impl Render for BatchSchedulerApp {
                                 "nav-exec",
                                 "排程設定及執行",
                                 matches!(active, NavTab::ScheduleExec | NavTab::ExecPreview | NavTab::GroupSetup),
+                                locked,
                                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    if this.runner_state.is_running {
+                                        return;
+                                    }
+                                    this.exec_console_mode = false;
                                     this.active_tab = NavTab::ScheduleExec;
                                     cx.notify();
                                 }),
@@ -114,13 +127,28 @@ impl Render for BatchSchedulerApp {
                                 "nav-settings",
                                 "設定",
                                 active == NavTab::Settings,
+                                locked,
                                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    if this.runner_state.is_running {
+                                        return;
+                                    }
+                                    this.exec_console_mode = false;
                                     this.active_tab = NavTab::Settings;
                                     cx.notify();
                                 }),
                             )),
                     )
-                    .child(
+                    .child(if self.active_tab == NavTab::ExecPreview {
+                        // 預覽頁：標題列固定在上方（含「開始執行」鍵），只有內容區捲動
+                        v_flex()
+                            .flex_1()
+                            .h_full()
+                            .min_w_0()
+                            .min_h_0()
+                            .p(pad)
+                            .child(self.render_exec_preview_view(cx))
+                            .into_any_element()
+                    } else {
                         v_flex()
                             .id("workspace-scroll-area")
                             .flex_1()
@@ -130,7 +158,7 @@ impl Render for BatchSchedulerApp {
                             .justify_start()
                             .items_start()
                             .overflow_y_scroll()
-                            .p(if is_narrow { px(16.) } else { px(24.) })
+                            .p(pad)
                             .child(div().w_full().flex_none().child(match self.active_tab {
                                 NavTab::ProgramManager => {
                                     self.render_program_view(viewport_w, cx).into_any_element()
@@ -147,17 +175,16 @@ impl Render for BatchSchedulerApp {
                                 NavTab::ScheduleExec => {
                                     self.render_schedule_exec_view(cx).into_any_element()
                                 }
-                                NavTab::ExecPreview => {
-                                    self.render_exec_preview_view(cx).into_any_element()
-                                }
+                                NavTab::ExecPreview => div().into_any_element(),
                                 NavTab::GroupSetup => {
                                     self.render_group_setup_view(cx).into_any_element()
                                 }
                                 NavTab::Settings => {
                                     self.render_settings_view(cx).into_any_element()
                                 }
-                            })),
-                    ),
+                            }))
+                            .into_any_element()
+                    }),
             )
             .children(Root::render_notification_layer(window, cx))
     }

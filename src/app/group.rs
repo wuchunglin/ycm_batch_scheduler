@@ -241,7 +241,19 @@ impl BatchSchedulerApp {
                 let repo = Repository::new(&guard);
                 repo.list_group_items(gid).unwrap_or_default()
             };
+            let mut skipped: Vec<String> = Vec::new();
             for it in items {
+                // 預設輸入值尚未設定完成的程式（待設定）不可排程
+                if self.program_pending(it.program_id) {
+                    let code = self
+                        .programs
+                        .iter()
+                        .find(|p| p.id == Some(it.program_id))
+                        .map(|p| p.job_code.clone())
+                        .unwrap_or_else(|| "?".to_string());
+                    skipped.push(code);
+                    continue;
+                }
                 let time_input = Self::new_exec_time_input(&it.expect_exe_time, window, cx);
                 self.exec_entries.push(ExecEntry {
                     program_id: it.program_id,
@@ -250,6 +262,15 @@ impl BatchSchedulerApp {
                     link_prev: it.link_prev_sn,
                     req_email: it.req_email,
                 });
+            }
+            if !skipped.is_empty() {
+                window.push_notification(
+                    Notification::warning(format!(
+                        "下列程式的欄位尚未全部選好預設輸入值，未加入執行清單：{}",
+                        skipped.join("、")
+                    )),
+                    cx,
+                );
             }
         } else {
             self.exec_sel_groups.remove(&gid);
@@ -266,6 +287,14 @@ impl BatchSchedulerApp {
         cx: &mut Context<Self>,
     ) {
         if checked {
+            if self.program_pending(pid) {
+                window.push_notification(
+                    Notification::warning("此批次程式的欄位尚未全部選好預設輸入值，請先到「批次程式新增」設定"),
+                    cx,
+                );
+                cx.notify();
+                return;
+            }
             if !self.exec_sel_programs.insert(pid) {
                 return;
             }

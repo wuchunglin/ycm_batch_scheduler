@@ -20,6 +20,7 @@ pub(super) fn nav_vertical(
     id: &'static str,
     title: &'static str,
     is_active: bool,
+    disabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let mut col = v_flex().items_center().gap_0();
@@ -32,7 +33,7 @@ pub(super) fn nav_vertical(
                 .child(ch.to_string()),
         );
     }
-    div()
+    let base = div()
         .id(SharedString::from(id))
         .px_3()
         .py_4()
@@ -42,10 +43,13 @@ pub(super) fn nav_vertical(
             hsl(0.0, 0.0, 100.0)
         } else {
             FOREGROUND
-        })
-        .cursor_pointer()
-        .on_click(on_click)
-        .child(col)
+        });
+    if disabled {
+        // 執行中：頁籤鎖住，變灰且不可點
+        base.opacity(0.4).child(col).into_any_element()
+    } else {
+        base.cursor_pointer().on_click(on_click).child(col).into_any_element()
+    }
 }
 
 #[allow(dead_code)]

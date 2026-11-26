@@ -36,7 +36,7 @@ mod win_uia {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
         KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN,
-        MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_MENU, VK_RETURN,
+        MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_RETURN,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextW,
@@ -80,9 +80,12 @@ mod win_uia {
         Ok(())
     }
 
-    /// 是否在填寫完參數後自動點擊 #btnF8 送出排程。
-    /// false：進入批次程式、填完參數後就停住（不點 F8、不關閉 Edge），由使用者自行確認。
-    const AUTO_SUBMIT_F8: bool = false;
+    /// 是否在填寫完參數後點擊 #btnF8 送出排程。
+    /// 預演模式：照排程步驟逐步開啟批次程式並填寫參數，但不點 F8；
+    /// 正式執行：填完參數後點 F8 送出。
+    fn submit_f8(req: &ExecutionRequest) -> bool {
+        !req.config.dry_run
+    }
 
     struct UiaSession {
         uia: IUIAutomation,
@@ -318,10 +321,10 @@ mod win_uia {
 
         match run_res {
             Ok(completed) => {
-                if AUTO_SUBMIT_F8 {
+                if submit_f8(req) {
                     session.close();
                 } else {
-                    emit_log(tx, "INFO", "已停在批次程式畫面（未點 F8），Edge 視窗保持開啟");
+                    emit_log(tx, "INFO", "預演完成：所有步驟已填寫（未點 F8），Edge 視窗保持開啟");
                 }
                 Ok(completed)
             }
@@ -349,31 +352,8 @@ mod win_uia {
         emit_status(tx, "開啟網址", format!("導航至 {}", req.config.target_url));
         emit_log(tx, "INFO", format!("Edge 已開啟網址：{}", req.config.target_url));
 
-        // PIN login: wait for the page, find the password field, type the PIN, submit.
-        emit_status(tx, "登入檢查", "等待登入頁 #pin 欄位出現");
-        match wait_pin_field(s, Duration::from_secs(25), tx) {
-            Some(pin_el) => {
-                if req.config.pin.trim().is_empty() {
-                    emit_log(
-                        tx,
-                        "WARN",
-                        "偵測到 PIN 登入頁，但系統設定的預設 PIN 碼為空，請於 Edge 視窗手動輸入並登入",
-                    );
-                } else {
-                    emit_status(tx, "登入中", "輸入 PIN 碼並送出登入");
-                    type_pin_and_submit(s, &pin_el, req.config.pin.trim(), tx)?;
-                    emit_log(tx, "INFO", "PIN 碼已輸入並送出登入，等待主畫面載入...");
-                    thread::sleep(Duration::from_millis(900));
-                }
-            }
-            None => {
-                emit_log(
-                    tx,
-                    "WARN",
-                    "25 秒內未偵測到 #pin 欄位（可能已登入、頁面尚未載入，或 UIA 無法讀取網頁內容），繼續等待主畫面",
-                );
-            }
-        }
+        // 登入檢查：已登入錨點 (#headerUserInfo) 或 PIN 欄位二擇一，皆未出現則中止，不再盲目往下執行。
+        ensure_logged_in(s, req, tx)?;
 
         emit_status(
             tx,
@@ -381,6 +361,7 @@ mod win_uia {
             "等待 #SampleGrid 載入（若需憑證或手動 SSO 登入，請於 Edge 視窗完成）",
         );
 
+        let do_f8 = submit_f8(req);
         let mut completed = 0usize;
         let mut is_very_first_navigation = true;
 
@@ -393,7 +374,7 @@ mod win_uia {
                     .unwrap_or_else(|| Local::now().date_naive());
                 let resolver = ParamResolver::new(base_date).with_custom_vars(req.custom_vars.clone());
 
-                if is_first_batch {
+                if is_first_batch || !do_f8 {
                     open_job_form_uia(
                         s,
                         &req.config.target_url,
@@ -418,14 +399,21 @@ mod win_uia {
                 );
                 fill_step_fields_uia(s, &resolver, step, sched, None)?;
 
-                if !AUTO_SUBMIT_F8 {
-                    emit_status(tx, "已填寫待確認", "已進入批次程式並填寫參數，依設定暫不點 F8");
+                if !do_f8 {
+                    completed += 1;
                     emit_log(
                         tx,
-                        "INFO",
-                        format!("{} ({}) 參數已填寫，未點 F8，流程在此停止", step.program.job_code, sched.roc_date),
+                        "SUCCESS",
+                        format!(
+                            "[{}/{}] {} ({}) ➜ 預演：參數已填寫（未點 F8）",
+                            completed, total_ops, step.program.job_code, sched.roc_date
+                        ),
                     );
-                    return Ok(completed);
+                    let _ = tx.send(RunnerEvent::StepProgress {
+                        current: completed,
+                        total: total_ops,
+                    });
+                    continue;
                 }
 
                 emit_status(tx, "F8送出", format!("送出 {} 排程", step.program.job_code));
@@ -491,14 +479,21 @@ mod win_uia {
                     );
                     fill_step_fields_uia(s, &resolver, step, sched, prev_sn.as_deref())?;
 
-                    if !AUTO_SUBMIT_F8 {
-                        emit_status(tx, "已填寫待確認", "已進入批次程式並填寫參數，依設定暫不點 F8");
+                    if !do_f8 {
+                        completed += 1;
                         emit_log(
                             tx,
-                            "INFO",
-                            format!("{} ({}) 參數已填寫，未點 F8，流程在此停止", step.program.job_code, sched.roc_date),
+                            "SUCCESS",
+                            format!(
+                                "[{}/{}] {} ({}) ➜ 預演：參數已填寫（未點 F8）",
+                                completed, total_ops, step.program.job_code, sched.roc_date
+                            ),
                         );
-                        return Ok(completed);
+                        let _ = tx.send(RunnerEvent::StepProgress {
+                            current: completed,
+                            total: total_ops,
+                        });
+                        continue;
                     }
 
                     emit_status(tx, "F8送出", format!("送出 {} 排程", step.program.job_code));
@@ -665,6 +660,7 @@ mod win_uia {
 
         let exe_date = resolve_step_date(resolver, &step.item.expect_exe_date_rule, sched);
         set_id_value(s, "expectExeDate", &exe_date)?;
+        dismiss_date_picker(s);
 
         let exe_time = if step.item.expect_exe_time.trim().is_empty() {
             sched.exe_time.clone()
@@ -673,9 +669,18 @@ mod win_uia {
         };
         if !exe_time.is_empty() {
             set_id_value(s, "expectExeTime", &exe_time)?;
+            dismiss_date_picker(s);
         }
 
         Ok(())
+    }
+
+    /// 填入日期／時間後送出 Esc，關閉 My97 日期選擇器浮層，避免擋住後續欄位與 F8 按鈕。
+    fn dismiss_date_picker(s: &UiaSession) {
+        s.focus_edge();
+        thread::sleep(Duration::from_millis(120));
+        send_vk_tap(VK_ESCAPE);
+        thread::sleep(Duration::from_millis(150));
     }
 
     fn clean_id(id: &str) -> &str {
@@ -701,41 +706,114 @@ mod win_uia {
         Ok(el)
     }
 
-    /// Locate the PIN input: by AutomationId "pin", else by password-edit property,
-    /// else by brute-force enumeration (same approach as pywinauto's child_window).
-    /// Refreshes the UIA root on every attempt because the web document tree is
-    /// built lazily after the window appears. Logs what it sees every 5 seconds.
-    fn wait_pin_field(
+    fn refresh_root(s: &mut UiaSession) {
+        if let Ok(fresh) = unsafe { s.uia.ElementFromHandle(s.edge_hwnd) } {
+            s.root = fresh;
+        }
+    }
+
+    /// 已登入錨點：登入後的頁面檔頭一定有 #headerUserInfo（姓名＋員工代號），
+    /// 且 getSysData 頁面會有 #SampleGrid / #fuzzyInquiry。PIN 登入頁沒有這些節點，也沒有 #pin 以外的上述 id。
+    /// 回傳 Some(使用者資訊文字)（可能為空字串）表示已登入。
+    fn detect_logged_in(s: &UiaSession) -> Option<String> {
+        let header = find_by_id(s, "headerUserInfo").ok()?;
+        let text = get_element_text(s, &header).trim().to_string();
+        if !text.is_empty() {
+            return Some(text);
+        }
+        if find_by_id(s, "SampleGrid").is_ok() || find_by_id(s, "fuzzyInquiry").is_ok() {
+            return Some(String::new());
+        }
+        None
+    }
+
+    fn find_pin_once(s: &UiaSession, tx: &UnboundedSender<RunnerEvent>) -> Option<IUIAutomationElement> {
+        if let Ok(el) = find_by_id(s, "pin") {
+            emit_log(tx, "INFO", "以 AutomationId=pin 找到 PIN 欄位");
+            return Some(el);
+        }
+        if let Some(el) = find_password_edit(s) {
+            emit_log(tx, "INFO", "以「密碼欄位」屬性找到 PIN 欄位");
+            return Some(el);
+        }
+        if let Some(el) = find_pin_by_enumeration(s) {
+            emit_log(tx, "INFO", "以逐一列舉節點找到 PIN 欄位");
+            return Some(el);
+        }
+        None
+    }
+
+    fn log_logged_in(tx: &UnboundedSender<RunnerEvent>, who: &str) {
+        if who.is_empty() {
+            emit_log(tx, "INFO", "已偵測到登入錨點（#SampleGrid / #fuzzyInquiry），視為已登入");
+        } else {
+            emit_log(tx, "INFO", format!("已偵測到登入錨點 #headerUserInfo：{who}，視為已登入"));
+        }
+    }
+
+    /// 等待登入錨點出現（PIN 送出後，或使用者手動登入時使用）。逾時回傳錯誤。
+    fn wait_logged_in(
         s: &mut UiaSession,
         timeout: Duration,
         tx: &UnboundedSender<RunnerEvent>,
-    ) -> Option<IUIAutomationElement> {
-        let start = Instant::now();
-        let deadline = start + timeout;
-        let mut attempt = 0u32;
+    ) -> Result<()> {
+        let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
+            refresh_root(s);
+            if let Some(who) = detect_logged_in(s) {
+                log_logged_in(tx, &who);
+                return Ok(());
+            }
+            // PIN 登入頁的錯誤訊息區 #certErrorDisplay 一旦出現文字（PIN 錯誤、元件未啟動等）即提早中止
+            if let Ok(err_el) = find_by_id(s, "certErrorDisplay") {
+                let msg = get_element_text(s, &err_el).trim().to_string();
+                if !msg.is_empty() {
+                    return Err(anyhow!("登入頁回報錯誤：{msg}"));
+                }
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+        emit_log(tx, "WARN", format!("最終診斷：{}", uia_diag_summary(s)));
+        Err(anyhow!(
+            "等待 {} 秒仍未偵測到登入錨點（#headerUserInfo），請確認 PIN 是否正確或已完成登入",
+            timeout.as_secs()
+        ))
+    }
+
+    /// 登入流程：
+    /// 1) 已有登入錨點 → 直接略過 PIN；
+    /// 2) 找到 #pin → 輸入 PIN 並等待登入錨點；
+    /// 3) 25 秒內兩者皆沒有 → 中止（不再往下執行排程）。
+    fn ensure_logged_in(
+        s: &mut UiaSession,
+        req: &ExecutionRequest,
+        tx: &UnboundedSender<RunnerEvent>,
+    ) -> Result<()> {
+        emit_status(tx, "登入檢查", "偵測登入狀態（#headerUserInfo 或 #pin 欄位）");
+
+        let start = Instant::now();
+        let detect_timeout = Duration::from_secs(25);
+        let mut attempt = 0u32;
+        let mut pin_el: Option<IUIAutomationElement> = None;
+
+        while start.elapsed() < detect_timeout {
             attempt += 1;
-            if let Ok(fresh) = unsafe { s.uia.ElementFromHandle(s.edge_hwnd) } {
-                s.root = fresh;
+            refresh_root(s);
+
+            if let Some(who) = detect_logged_in(s) {
+                log_logged_in(tx, &who);
+                return Ok(());
             }
-            if let Ok(el) = find_by_id(s, "pin") {
-                emit_log(tx, "INFO", "以 AutomationId=pin 找到 PIN 欄位");
-                return Some(el);
-            }
-            if let Some(el) = find_password_edit(s) {
-                emit_log(tx, "INFO", "以「密碼欄位」屬性找到 PIN 欄位");
-                return Some(el);
-            }
-            if let Some(el) = find_pin_by_enumeration(s) {
-                emit_log(tx, "INFO", "以逐一列舉節點找到 PIN 欄位");
-                return Some(el);
+            if let Some(el) = find_pin_once(s, tx) {
+                pin_el = Some(el);
+                break;
             }
             if attempt % 10 == 1 {
                 emit_log(
                     tx,
                     "DEBUG",
                     format!(
-                        "尚未找到 PIN 欄位（{}s）：{}",
+                        "尚未偵測到登入錨點或 PIN 欄位（{}s）：{}",
                         start.elapsed().as_secs(),
                         uia_diag_summary(s)
                     ),
@@ -743,8 +821,28 @@ mod win_uia {
             }
             thread::sleep(Duration::from_millis(500));
         }
-        emit_log(tx, "WARN", format!("最終診斷：{}", uia_diag_summary(s)));
-        None
+
+        let Some(pin_el) = pin_el else {
+            emit_log(tx, "WARN", format!("最終診斷：{}", uia_diag_summary(s)));
+            return Err(anyhow!(
+                "{} 秒內未偵測到 #pin 欄位，也未偵測到已登入錨點（#headerUserInfo），無法確認登入狀態，已中止排程",
+                detect_timeout.as_secs()
+            ));
+        };
+
+        if req.config.pin.trim().is_empty() {
+            emit_log(
+                tx,
+                "WARN",
+                "偵測到 PIN 登入頁，但系統設定的預設 PIN 碼為空，請於 Edge 視窗手動輸入並登入（最多等待 120 秒）",
+            );
+            return wait_logged_in(s, Duration::from_secs(120), tx);
+        }
+
+        emit_status(tx, "登入中", "輸入 PIN 碼並送出登入");
+        type_pin_and_submit(s, &pin_el, req.config.pin.trim(), tx)?;
+        emit_log(tx, "INFO", "PIN 碼已輸入並送出登入，等待登入錨點出現...");
+        wait_logged_in(s, Duration::from_secs(60), tx)
     }
 
     /// Enumerate descendants (capped) looking for id "pin" or a password edit.
@@ -1554,6 +1652,6 @@ pub async fn execute_uia(
     _total_ops: usize,
 ) -> anyhow::Result<()> {
     Err(anyhow::anyhow!(
-        "Windows UI Automation (IUIAutomation) 僅支援 Windows 桌面環境；目前系統請使用預演模式 (Dry-Run)"
+        "Windows UI Automation (IUIAutomation) 僅支援 Windows 桌面環境；此功能無法在目前系統執行"
     ))
 }
