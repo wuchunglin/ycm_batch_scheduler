@@ -12,17 +12,17 @@ pub const fn hsl(h: f32, s: f32, l: f32) -> Hsla {
     }
 }
 
-pub const BACKGROUND: Hsla = hsl(224.0, 71.0, 4.0);
-pub const FOREGROUND: Hsla = hsl(213.0, 31.0, 91.0);
-pub const CARD: Hsla = hsl(224.0, 71.0, 8.0);
-pub const PRIMARY: Hsla = hsl(210.0, 100.0, 50.0);
-pub const SECONDARY: Hsla = hsl(222.0, 47.0, 14.0);
-pub const MUTED_FOREGROUND: Hsla = hsl(215.0, 20.0, 65.0);
-pub const ACCENT: Hsla = hsl(216.0, 34.0, 17.0);
-pub const BORDER: Hsla = hsl(216.0, 34.0, 20.0);
-pub const SUCCESS: Hsla = hsl(142.0, 76.0, 42.0);
-pub const WARNING: Hsla = hsl(38.0, 92.0, 50.0);
-pub const DANGER: Hsla = hsl(0.0, 84.0, 60.0);
+pub const BACKGROUND: Hsla = hsl(140.0, 28.0, 94.0);
+pub const FOREGROUND: Hsla = hsl(150.0, 25.0, 14.0);
+pub const CARD: Hsla = hsl(140.0, 30.0, 98.0);
+pub const PRIMARY: Hsla = hsl(142.0, 55.0, 32.0);
+pub const SECONDARY: Hsla = hsl(140.0, 32.0, 88.0);
+pub const MUTED_FOREGROUND: Hsla = hsl(150.0, 12.0, 36.0);
+pub const ACCENT: Hsla = hsl(140.0, 36.0, 84.0);
+pub const BORDER: Hsla = hsl(140.0, 22.0, 78.0);
+pub const SUCCESS: Hsla = hsl(142.0, 72.0, 26.0);
+pub const WARNING: Hsla = hsl(32.0, 90.0, 36.0);
+pub const DANGER: Hsla = hsl(0.0, 72.0, 46.0);
 
 fn lighten(c: Hsla, by: f32) -> Hsla {
     hsla(c.h, c.s, (c.l + by).min(1.0), c.a)
@@ -33,7 +33,7 @@ fn darken(c: Hsla, by: f32) -> Hsla {
 }
 
 pub fn apply(cx: &mut App) {
-    Theme::change(ThemeMode::Dark, None, cx);
+    Theme::change(ThemeMode::Light, None, cx);
     let t = Theme::global_mut(cx);
 
     if cfg!(windows) {

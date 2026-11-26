@@ -35,6 +35,15 @@ pub struct ProgramField {
     pub sort_order: i32,
 }
 
+/// 預設輸入值清單項目（欄位的預設輸入值由此清單選擇）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DefaultValue {
+    pub id: Option<i64>,
+    pub name: String,
+    pub rule_code: String, // "E1".."EG", "STATIC", ...
+    pub rule_value: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobGroup {
     pub id: Option<i64>,

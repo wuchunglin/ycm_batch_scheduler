@@ -3,7 +3,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 
 use crate::models::{
-    CustomVariable, GroupItem, GroupItemParam, GroupItemParamDetail, JobGroup, Program,
+    CustomVariable, DefaultValue, GroupItem, GroupItemParam, GroupItemParamDetail, JobGroup, Program,
     ProgramField, SysConfig,
 };
 
@@ -320,6 +320,104 @@ impl<'a> Repository<'a> {
     pub fn delete_program_field(&self, field_id: i64) -> Result<()> {
         self.conn
             .execute("DELETE FROM program_fields WHERE id = ?1", params![field_id])?;
+        Ok(())
+    }
+
+    // --- Default values (預設輸入值) ---
+    pub fn list_default_values(&self) -> Result<Vec<DefaultValue>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, rule_code, rule_value FROM default_values ORDER BY id ASC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(DefaultValue {
+                id: Some(row.get(0)?),
+                name: row.get(1)?,
+                rule_code: row.get(2)?,
+                rule_value: row.get(3)?,
+            })
+        })?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    /// field_id -> default_id
+    pub fn field_defaults_for_program(&self, program_id: i64) -> Result<HashMap<i64, i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.field_id, d.default_id FROM field_defaults d \
+             JOIN program_fields f ON f.id = d.field_id WHERE f.program_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![program_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut map = HashMap::new();
+        for r in rows {
+            let (field_id, default_id) = r?;
+            map.insert(field_id, default_id);
+        }
+        Ok(map)
+    }
+
+    pub fn set_field_default(&self, field_id: i64, default_id: Option<i64>) -> Result<()> {
+        match default_id {
+            Some(d) => {
+                self.conn.execute(
+                    "INSERT INTO field_defaults (field_id, default_id) VALUES (?1, ?2) \
+                     ON CONFLICT(field_id) DO UPDATE SET default_id = excluded.default_id",
+                    params![field_id, d],
+                )?;
+            }
+            None => {
+                self.conn
+                    .execute("DELETE FROM field_defaults WHERE field_id = ?1", params![field_id])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// program_id -> (欄位數, 已設定預設值的欄位數)
+    pub fn program_stats(&self) -> Result<HashMap<i64, (usize, usize)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.program_id, COUNT(f.id), COUNT(d.default_id) FROM program_fields f \
+             LEFT JOIN field_defaults d ON d.field_id = f.id GROUP BY f.program_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut map = HashMap::new();
+        for r in rows {
+            let (pid, total, done) = r?;
+            map.insert(pid, (total.max(0) as usize, done.max(0) as usize));
+        }
+        Ok(map)
+    }
+
+    /// 找出其他程式中「同欄位 ID」已設定的預設值
+    pub fn find_default_by_html_id(&self, html_id: &str, exclude_program: i64) -> Result<Option<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.default_id FROM program_fields f \
+             JOIN field_defaults d ON d.field_id = f.id \
+             WHERE f.html_id = ?1 AND f.program_id <> ?2 ORDER BY d.field_id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![html_id, exclude_program])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn update_program(&self, id: i64, job_code: &str, job_name: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE programs SET job_code = ?1, job_name = ?2 WHERE id = ?3",
+            params![job_code, job_name, id],
+        )?;
         Ok(())
     }
 

@@ -45,7 +45,7 @@ fn main() -> anyhow::Result<()> {
                 size(px(1280.), px(840.)),
                 cx,
             ))),
-            window_min_size: Some(size(px(1024.), px(680.))),
+            window_min_size: Some(size(px(480.), px(480.))),
             titlebar: Some(TitlebarOptions {
                 title: Some("YCM 共用批次排程自動化執行系統 (GPUI 通用版)".into()),
                 ..Default::default()

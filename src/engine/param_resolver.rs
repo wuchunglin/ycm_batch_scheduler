@@ -148,6 +148,7 @@ impl ParamResolver {
             "MONTH_OFFSET" => self.resolve_month_offset(rule_value),
             "WEEK_DAY" | "WEEK" => self.resolve_week_day(rule_value),
             "MONTH_EDGE" => self.resolve_month_edge(rule_value),
+            "DATE_EDGE" => self.resolve_date_edge(rule_value),
             "STATIC" => rule_value.to_string(),
             "TEMPLATE" | "CUSTOM_TEMPLATE" => self.resolve_template(rule_value),
 
@@ -244,6 +245,46 @@ impl ParamResolver {
                 format!("{:03}{:02}{:02}", y - 1911, m, last_day)
             }
             _ => value.to_string(),
+        }
+    }
+
+    /// Calendar period edges (ROC YYYMMDD). Value format: `KEY` or `KEY:<year offset>`,
+    /// KEY = PREV_QUARTER_FIRST | PREV_QUARTER_LAST | PREV_HALF_FIRST | PREV_HALF_LAST
+    ///     | YEAR_FIRST | YEAR_LAST.  The year offset (e.g. -4) shifts the base year first.
+    fn resolve_date_edge(&self, value: &str) -> String {
+        let val = value.trim().to_uppercase();
+        let mut parts = val.splitn(2, ':');
+        let key = parts.next().unwrap_or("");
+        let year_offset: i32 = parts
+            .next()
+            .map(|s| s.trim().trim_start_matches('+').parse().unwrap_or(0))
+            .unwrap_or(0);
+        let year = self.base_date.year() + year_offset;
+        let month = self.base_date.month();
+
+        // (year, start_month, end_month)
+        let (y, start_m, end_m) = match key {
+            "PREV_QUARTER_FIRST" | "PREV_QUARTER_LAST" => {
+                let q = ((month - 1) / 3) as i32; // 0..=3
+                let (y, pq) = if q == 0 { (year - 1, 3) } else { (year, q - 1) };
+                let sm = (pq * 3 + 1) as u32;
+                (y, sm, sm + 2)
+            }
+            "PREV_HALF_FIRST" | "PREV_HALF_LAST" => {
+                let h = ((month - 1) / 6) as i32; // 0 or 1
+                let (y, ph) = if h == 0 { (year - 1, 1) } else { (year, 0) };
+                let sm = (ph * 6 + 1) as u32;
+                (y, sm, sm + 5)
+            }
+            "YEAR_FIRST" | "YEAR_LAST" => (year, 1, 12),
+            _ => return value.to_string(),
+        };
+
+        if key.ends_with("_FIRST") {
+            format!("{:03}{:02}01", y - 1911, start_m)
+        } else {
+            let last = RocDateUtils::days_in_month(y, end_m);
+            format!("{:03}{:02}{:02}", y - 1911, end_m, last)
         }
     }
 
