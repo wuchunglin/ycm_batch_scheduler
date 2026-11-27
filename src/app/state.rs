@@ -59,11 +59,21 @@ impl BatchSchedulerApp {
             field_rows: Vec::new(),
             field_rows_dirty: true,
             open_picker: None,
+            open_year_picker: None,
+            year_picker_closed_by: None,
             picker_closed_by: None,
             picker_focus: cx.focus_handle(),
             default_values: Vec::new(),
             field_defaults: HashMap::new(),
             prog_stats: HashMap::new(),
+            pd_open: false,
+            param_help_open: false,
+            pd_editing: None,
+            pd_name_input: cx
+                .new(|cx| InputState::new(window, cx).placeholder("選項名稱，如：執行日後8天")),
+            pd_value_input: cx.new(|cx| InputState::new(window, cx).placeholder("規則值")),
+            pd_rule: "STATIC".to_string(),
+            pd_confirm_delete: None,
 
             groups: Vec::new(),
             selected_group: None,
@@ -444,6 +454,7 @@ impl BatchSchedulerApp {
         for f in self.selected_fields.clone() {
             let label = f.label.clone();
             let html_id = f.html_id.clone();
+            let year_ad = f.year_ad;
             let label_input = cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("欄位名稱")
@@ -474,10 +485,12 @@ impl BatchSchedulerApp {
                 id_input,
                 default_id,
                 custom_input,
+                year_ad,
             });
         }
         self.field_rows = rows;
         self.open_picker = None;
+        self.open_year_picker = None;
     }
 
     pub(super) fn select_group_item(&mut self, item: GroupItem, window: &mut Window, cx: &mut Context<Self>) {

@@ -33,6 +33,9 @@ pub struct ProgramField {
     pub max_length: usize,
     pub is_required: bool,
     pub sort_order: i32,
+    /// 年度格式：false = 民國年（預設，{E1} → 1151127）、true = 西元年（{E1} → 20261127）
+    #[serde(default)]
+    pub year_ad: bool,
 }
 
 /// 預設輸入值清單項目（欄位的預設輸入值由此清單選擇）
@@ -98,6 +101,9 @@ pub struct GroupItemParamDetail {
     pub rule_code: String,
     pub rule_value: String,
     pub is_configured: bool,
+    /// 欄位的年度格式：false = 民國年（預設）、true = 西元年
+    #[serde(default)]
+    pub year_ad: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

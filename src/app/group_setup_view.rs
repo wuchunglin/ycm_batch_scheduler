@@ -1,5 +1,6 @@
 //! 群組設定畫面
 
+use super::helpers::{drag_handle, drag_over_style, DragList, DragRow};
 use super::*;
 
 impl BatchSchedulerApp {
@@ -219,6 +220,18 @@ impl BatchSchedulerApp {
                 .rounded_md()
                 .border_1()
                 .border_color(BORDER)
+                .drag_over::<DragRow>(|style, d, _, _| drag_over_style(style, d, DragList::GroupSetup))
+                .on_drop(cx.listener(move |this, d: &DragRow, window, cx| {
+                    if d.list == DragList::GroupSetup {
+                        this.move_group_item(d.id, item_id, window, cx);
+                    }
+                }))
+                .child(drag_handle(
+                    SharedString::from(format!("gs-drag-{item_id}")),
+                    DragList::GroupSetup,
+                    item_id,
+                    format!("{}　{}", code, name),
+                ))
                 .child(
                     div()
                         .w(px(28.))
@@ -320,31 +333,6 @@ impl BatchSchedulerApp {
                     );
             }
             row = row
-                .child(
-                    h_flex()
-                        .flex_shrink_0()
-                        .gap_0()
-                        .child(
-                            Button::new(SharedString::from(format!("gs-up-{item_id}")))
-                                .small()
-                                .ghost()
-                                .w(px(30.))
-                                .label("▲")
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    this.move_group_item(item_id, true, window, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("gs-down-{item_id}")))
-                                .small()
-                                .ghost()
-                                .w(px(30.))
-                                .label("▼")
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    this.move_group_item(item_id, false, window, cx);
-                                })),
-                        ),
-                )
                 .child(
                     Button::new(SharedString::from(format!("gs-rm-{item_id}")))
                         .small()

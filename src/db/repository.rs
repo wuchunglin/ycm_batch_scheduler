@@ -139,8 +139,8 @@ impl<'a> Repository<'a> {
                 self.conn.execute(
                     r#"
                     INSERT INTO program_fields
-                    (program_id, field_scope, html_id, html_name, label, tag_type, max_length, is_required, sort_order)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    (program_id, field_scope, html_id, html_name, label, tag_type, max_length, is_required, sort_order, year_ad)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                     "#,
                     params![
                         prog_id,
@@ -152,6 +152,7 @@ impl<'a> Repository<'a> {
                         field.max_length as i64,
                         field.is_required,
                         field.sort_order,
+                        field.year_ad,
                     ],
                 )?;
                 kept_ids.push(self.conn.last_insert_rowid());
@@ -246,7 +247,7 @@ impl<'a> Repository<'a> {
     pub fn list_program_fields(&self, program_id: i64) -> Result<Vec<ProgramField>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, program_id, field_scope, html_id, html_name, label, tag_type, max_length, is_required, sort_order
+            SELECT id, program_id, field_scope, html_id, html_name, label, tag_type, max_length, is_required, sort_order, year_ad
             FROM program_fields WHERE program_id = ?1 ORDER BY sort_order ASC, id ASC
             "#,
         )?;
@@ -263,6 +264,7 @@ impl<'a> Repository<'a> {
                 max_length: max_len.max(0) as usize,
                 is_required: row.get(8)?,
                 sort_order: row.get(9)?,
+                year_ad: row.get(10)?,
             })
         })?;
         let mut list = Vec::new();
@@ -278,8 +280,8 @@ impl<'a> Repository<'a> {
                 r#"
                 UPDATE program_fields
                 SET field_scope = ?1, html_id = ?2, html_name = ?3, label = ?4, tag_type = ?5,
-                    max_length = ?6, is_required = ?7, sort_order = ?8
-                WHERE id = ?9
+                    max_length = ?6, is_required = ?7, sort_order = ?8, year_ad = ?9
+                WHERE id = ?10
                 "#,
                 params![
                     field.field_scope,
@@ -290,6 +292,7 @@ impl<'a> Repository<'a> {
                     field.max_length as i64,
                     field.is_required,
                     field.sort_order,
+                    field.year_ad,
                     fid,
                 ],
             )?;
@@ -298,8 +301,8 @@ impl<'a> Repository<'a> {
             self.conn.execute(
                 r#"
                 INSERT INTO program_fields
-                (program_id, field_scope, html_id, html_name, label, tag_type, max_length, is_required, sort_order)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                (program_id, field_scope, html_id, html_name, label, tag_type, max_length, is_required, sort_order, year_ad)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 "#,
                 params![
                     field.program_id,
@@ -311,6 +314,7 @@ impl<'a> Repository<'a> {
                     field.max_length as i64,
                     field.is_required,
                     field.sort_order,
+                    field.year_ad,
                 ],
             )?;
             Ok(self.conn.last_insert_rowid())
@@ -327,7 +331,7 @@ impl<'a> Repository<'a> {
     pub fn list_default_values(&self) -> Result<Vec<DefaultValue>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, rule_code, rule_value FROM default_values ORDER BY id ASC")?;
+            .prepare("SELECT id, name, rule_code, rule_value FROM default_values ORDER BY sort_order ASC, id ASC")?;
         let rows = stmt.query_map([], |row| {
             Ok(DefaultValue {
                 id: Some(row.get(0)?),
@@ -341,6 +345,61 @@ impl<'a> Repository<'a> {
             list.push(r?);
         }
         Ok(list)
+    }
+
+    /// 參數設定：新增下拉選單選項
+    pub fn add_default_value(&self, name: &str, rule_code: &str, rule_value: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO default_values (name, rule_code, rule_value, sort_order) \
+             VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM default_values))",
+            params![name, rule_code, rule_value],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// 參數設定：修改下拉選單選項（欄位以 id 關聯，改名 / 改規則會立即套用到使用它的欄位）
+    pub fn update_default_value(
+        &self,
+        id: i64,
+        name: &str,
+        rule_code: &str,
+        rule_value: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE default_values SET name = ?1, rule_code = ?2, rule_value = ?3 WHERE id = ?4",
+            params![name, rule_code, rule_value, id],
+        )?;
+        Ok(())
+    }
+
+    /// 參數設定：刪除下拉選單選項（已選用此選項的欄位設定會一併清除，程式變成「待設定」）
+    pub fn delete_default_value(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM field_defaults WHERE default_id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM default_values WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// 參數設定：依傳入的 id 順序重新排列下拉選單選項（顯示順序）
+    pub fn reorder_default_values(&self, ids_in_order: &[i64]) -> Result<()> {
+        for (i, id) in ids_in_order.iter().enumerate() {
+            self.conn.execute(
+                "UPDATE default_values SET sort_order = ?1 WHERE id = ?2",
+                params![(i + 1) as i64, id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 有多少個欄位正在使用某個下拉選單選項
+    pub fn default_value_usage(&self, id: i64) -> Result<i64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM field_defaults WHERE default_id = ?1",
+            params![id],
+            |r| r.get(0),
+        )?;
+        Ok(n)
     }
 
     /// 「自行輸入」的預設值：以 "自訂：<內容>" 為名建立（已存在則重用），規則為 CUSTOM_TEMPLATE
@@ -597,30 +656,29 @@ impl<'a> Repository<'a> {
         Ok(())
     }
 
-    pub fn swap_group_item_order(&self, group_id: i64, item_id: i64, move_up: bool) -> Result<()> {
-        let items = self.list_group_items(group_id)?;
-        if let Some(pos) = items.iter().position(|i| i.id == Some(item_id)) {
-            let target_pos = if move_up && pos > 0 {
-                Some(pos - 1)
-            } else if !move_up && pos + 1 < items.len() {
-                Some(pos + 1)
-            } else {
-                None
-            };
-            if let Some(t_pos) = target_pos {
-                let a = &items[pos];
-                let b = &items[t_pos];
-                if let (Some(a_id), Some(b_id)) = (a.id, b.id) {
-                    self.conn.execute(
-                        "UPDATE group_items SET step_order = ?1 WHERE id = ?2",
-                        params![b.step_order, a_id],
-                    )?;
-                    self.conn.execute(
-                        "UPDATE group_items SET step_order = ?1 WHERE id = ?2",
-                        params![a.step_order, b_id],
-                    )?;
-                }
-            }
+    /// 拖曳排序：把 item_id 移到 target_item_id 所在的位置，其餘步驟順延，並重新編號為 1..n
+    pub fn move_group_item_to(&self, group_id: i64, item_id: i64, target_item_id: i64) -> Result<()> {
+        let mut ids: Vec<i64> = self
+            .list_group_items(group_id)?
+            .iter()
+            .filter_map(|i| i.id)
+            .collect();
+        let (Some(from), Some(to)) = (
+            ids.iter().position(|i| *i == item_id),
+            ids.iter().position(|i| *i == target_item_id),
+        ) else {
+            return Ok(());
+        };
+        if from == to {
+            return Ok(());
+        }
+        let moved = ids.remove(from);
+        ids.insert(to, moved);
+        for (idx, id) in ids.iter().enumerate() {
+            self.conn.execute(
+                "UPDATE group_items SET step_order = ?1 WHERE id = ?2",
+                params![(idx + 1) as i32, id],
+            )?;
         }
         Ok(())
     }
@@ -725,6 +783,7 @@ impl<'a> Repository<'a> {
                     max_length: 0,
                     is_required: true,
                     sort_order: next_order,
+                    year_ad: false,
                 })?
             }
         };
@@ -795,6 +854,7 @@ impl<'a> Repository<'a> {
                     rule_code: p.rule_code.clone(),
                     rule_value: p.rule_value.clone(),
                     is_configured: true,
+                    year_ad: f.year_ad,
                 });
             } else {
                 details.push(GroupItemParamDetail {
@@ -810,6 +870,7 @@ impl<'a> Repository<'a> {
                     rule_code: "STATIC".to_string(),
                     rule_value: String::new(),
                     is_configured: false,
+                    year_ad: f.year_ad,
                 });
             }
         }

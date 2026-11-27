@@ -232,10 +232,11 @@ impl BatchSchedulerApp {
         true
     }
 
+    /// 拖曳排序：把 item_id 移到 target_item_id 的位置
     pub(super) fn move_group_item(
         &mut self,
         item_id: i64,
-        up: bool,
+        target_item_id: i64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -245,7 +246,7 @@ impl BatchSchedulerApp {
         {
             let guard = self.conn.lock().unwrap();
             let repo = Repository::new(&guard);
-            if let Err(e) = repo.swap_group_item_order(gid, item_id, up) {
+            if let Err(e) = repo.move_group_item_to(gid, item_id, target_item_id) {
                 window.push_notification(
                     Notification::error(format!("調整順序失敗：{e}")),
                     cx,
@@ -343,18 +344,10 @@ impl BatchSchedulerApp {
         cx.notify();
     }
 
-    pub(super) fn move_exec_entry(&mut self, idx: usize, up: bool, cx: &mut Context<Self>) {
-        let target = if up {
-            idx.checked_sub(1)
-        } else if idx + 1 < self.exec_entries.len() {
-            Some(idx + 1)
-        } else {
-            None
-        };
-        if let Some(t) = target {
-            self.exec_entries.swap(idx, t);
-            cx.notify();
-        }
+    /// 拖曳排序：把執行清單第 from 列移到第 to 列的位置
+    pub(super) fn move_exec_entry(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        super::helpers::move_vec_item(&mut self.exec_entries, from, to);
+        cx.notify();
     }
 
     pub(super) fn remove_exec_entry(&mut self, idx: usize, cx: &mut Context<Self>) {

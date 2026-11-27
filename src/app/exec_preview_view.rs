@@ -162,6 +162,8 @@ impl BatchSchedulerApp {
         let defaults = repo.field_defaults_for_program(e.program_id).unwrap_or_default();
         for f in fields {
             let fid = f.id.unwrap_or(0);
+            // 欄位的年度格式：民國年（預設）或西元年
+            let fmt = YearFormat::from_ad(f.year_ad);
             let dv = defaults
                 .get(&fid)
                 .and_then(|did| self.default_values.iter().find(|d| d.id == Some(*did)));
@@ -170,7 +172,7 @@ impl BatchSchedulerApp {
                     field_id: fid,
                     label: f.label,
                     default_name: d.name.clone(),
-                    resolved: resolver.resolve(&d.rule_code, &d.rule_value),
+                    resolved: resolver.resolve_with(&d.rule_code, &d.rule_value, fmt),
                     configured: true,
                 },
                 None => ParamPreviewRow {
@@ -353,6 +355,7 @@ impl BatchSchedulerApp {
                             rule_code: dv.map(|d| d.rule_code.clone()).unwrap_or_default(),
                             rule_value: dv.map(|d| d.rule_value.clone()).unwrap_or_default(),
                             is_configured: dv.is_some(),
+                            year_ad: f.year_ad,
                         }
                     })
                     .collect();

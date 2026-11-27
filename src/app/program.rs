@@ -223,6 +223,8 @@ impl BatchSchedulerApp {
             id_input,
             default_id: None,
             custom_input,
+            // 新欄位預設民國年
+            year_ad: false,
         });
         cx.notify();
     }
@@ -242,6 +244,7 @@ impl BatchSchedulerApp {
             self.reload_groups(window, cx);
         }
         self.open_picker = None;
+        self.open_year_picker = None;
         self.refresh_prog_stats();
         cx.notify();
         window.push_notification(Notification::success("已刪除欄位"), cx);
@@ -253,17 +256,18 @@ impl BatchSchedulerApp {
             window.push_notification(Notification::error("請先選取批次程式"), cx);
             return;
         };
-        let mut entries: Vec<(Option<ProgramField>, String, String, Option<i64>, String)> = Vec::new();
+        // (原欄位, 欄位名稱, 欄位 ID, 預設輸入值 id, 自行輸入, 年度格式 true=西元年)
+        let mut entries: Vec<(Option<ProgramField>, String, String, Option<i64>, String, bool)> = Vec::new();
         for row in &self.field_rows {
             let label = row.label_input.read(cx).value().trim().to_string();
             let html_id = row.id_input.read(cx).value().trim().to_string();
             let custom = row.custom_input.read(cx).value().trim().to_string();
-            entries.push((row.base.clone(), label, html_id, row.default_id, custom));
+            entries.push((row.base.clone(), label, html_id, row.default_id, custom, row.year_ad));
         }
 
         let mut seen_labels: HashSet<String> = HashSet::new();
         let mut seen_ids: HashSet<String> = HashSet::new();
-        for (i, (_, label, html_id, _, _)) in entries.iter().enumerate() {
+        for (i, (_, label, html_id, _, _, _)) in entries.iter().enumerate() {
             let n = i + 1;
             if label.is_empty() || html_id.is_empty() {
                 window.push_notification(
@@ -289,7 +293,7 @@ impl BatchSchedulerApp {
         }
 
         // 有參數一定要選預設輸入值，否則不能儲存（單列修改只檢查該列）
-        for (i, (_, label, _, default_id, custom)) in entries.iter().enumerate() {
+        for (i, (_, label, _, default_id, custom, _)) in entries.iter().enumerate() {
             if let Some(o) = only {
                 if o != i {
                     continue;
@@ -312,7 +316,7 @@ impl BatchSchedulerApp {
         {
             let guard = self.conn.lock().unwrap();
             let repo = Repository::new(&guard);
-            for (i, (base, label, html_id, default_id, custom)) in entries.iter().enumerate() {
+            for (i, (base, label, html_id, default_id, custom, year_ad)) in entries.iter().enumerate() {
                 if let Some(o) = only {
                     if o != i {
                         continue;
@@ -334,6 +338,7 @@ impl BatchSchedulerApp {
                         max_length: b.max_length,
                         is_required: b.is_required,
                         sort_order: i as i32,
+                        year_ad: *year_ad,
                     },
                     None => ProgramField {
                         id: None,
@@ -346,6 +351,7 @@ impl BatchSchedulerApp {
                         max_length: 0,
                         is_required: true,
                         sort_order: i as i32,
+                        year_ad: *year_ad,
                     },
                 };
                 match repo.upsert_program_field(&field) {
@@ -382,6 +388,8 @@ impl BatchSchedulerApp {
             window.push_notification(Notification::error(e), cx);
             return;
         }
+        // 年度格式 / 預設輸入值有變動 → 執行預覽的參數要重新轉換
+        self.exec_param_dirty = true;
         if only.is_some() {
             for (i, f) in saved {
                 if let Some(row) = self.field_rows.get_mut(i) {
@@ -630,6 +638,7 @@ impl BatchSchedulerApp {
                     .child(div().flex_1().min_w(px(120.)).child("欄位 ID"))
                     .child(div().w(px(240.)).flex_shrink_0().child("預設輸入值（下拉）"))
                     .child(div().flex_1().min_w(px(200.)).child("自行輸入（優先，可用 {E1} 等變數）"))
+                    .child(div().w(px(150.)).flex_shrink_0().child("年度格式"))
                     .child(div().w(px(80.)).flex_shrink_0().child("操作")),
             );
         }
@@ -680,6 +689,7 @@ impl BatchSchedulerApp {
                                 return;
                             }
                             this.picker_closed_by = None;
+                            this.open_year_picker = None;
                             this.open_picker = if this.open_picker == Some(i) {
                                 None
                             } else {
@@ -707,11 +717,8 @@ impl BatchSchedulerApp {
                 if picker_open {
                     let mut menu = v_flex()
                         .id(SharedString::from(format!("pk-menu-{i}")))
-                        .absolute()
-                        .top(px(36.))
-                        .left_0()
-                        .w_full()
-                        .max_h(px(260.))
+                        .w(px(260.))
+                        .max_h(px(240.))
                         .overflow_y_scroll()
                         .p_1()
                         .gap_0p5()
@@ -753,10 +760,94 @@ impl BatchSchedulerApp {
                             }),
                         ));
                     }
-                    cell = cell.child(gpui::deferred(menu).with_priority(10));
+                    // 用 anchored 讓選單自動貼齊視窗邊界：下方空間不夠時會往上移，不會被視窗截掉
+                    let anchored_menu = gpui::anchored()
+                        .anchor(gpui::Corner::TopLeft)
+                        .offset(gpui::point(px(0.), px(36.)))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(menu);
+                    cell = cell.child(gpui::deferred(anchored_menu).with_priority(10));
                 }
                 cell
             };
+            // 年度格式：民國年（預設）/ 西元年，每個欄位各自設定
+            // 年度格式：下拉選單（民國年為預設 / 西元年），每個欄位各自設定
+            let year_open = self.open_year_picker == Some(i);
+            let year_trigger = h_flex()
+                .id(SharedString::from(format!("year-pick-{i}")))
+                .w_full()
+                .h(px(28.))
+                .px_3()
+                .items_center()
+                .justify_between()
+                .bg(BACKGROUND)
+                .border_1()
+                .border_color(if year_open { PRIMARY } else { BORDER })
+                .rounded_md()
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                        // 此次點擊已先被選單的「點外部關閉」處理過 → 視為關閉，不再重開
+                        if this.year_picker_closed_by == Some((i, ev.position)) {
+                            this.year_picker_closed_by = None;
+                            cx.notify();
+                            return;
+                        }
+                        this.year_picker_closed_by = None;
+                        this.open_picker = None;
+                        this.open_year_picker = if this.open_year_picker == Some(i) {
+                            None
+                        } else {
+                            Some(i)
+                        };
+                        cx.notify();
+                    }),
+                )
+                .child(div().text_sm().child(if row.year_ad { "西元年" } else { "民國年" }))
+                .child(div().text_xs().text_color(MUTED_FOREGROUND).child("▼"));
+            let mut year_cell = div().relative().w_full().child(year_trigger);
+            if year_open {
+                let mut menu = v_flex()
+                    .id(SharedString::from(format!("year-menu-{i}")))
+                    .w(px(130.))
+                    .p_1()
+                    .gap_0p5()
+                    .bg(CARD)
+                    .border_1()
+                    .border_color(BORDER)
+                    .rounded_md()
+                    .shadow_lg()
+                    .occlude()
+                    .on_mouse_down_out(cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                        if this.open_year_picker == Some(i) {
+                            this.open_year_picker = None;
+                            this.year_picker_closed_by = Some((i, ev.position));
+                            cx.notify();
+                        }
+                    }));
+                for (label, is_ad) in [("民國年", false), ("西元年", true)] {
+                    menu = menu.child(dropdown_item(
+                        SharedString::from(format!("year-opt-{i}-{}", is_ad as u8)),
+                        label,
+                        row.year_ad == is_ad,
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if let Some(r) = this.field_rows.get_mut(i) {
+                                r.year_ad = is_ad;
+                            }
+                            this.open_year_picker = None;
+                            cx.notify();
+                        }),
+                    ));
+                }
+                let anchored_menu = gpui::anchored()
+                    .anchor(gpui::Corner::TopLeft)
+                    .offset(gpui::point(px(0.), px(36.)))
+                    .snap_to_window_with_margin(px(8.))
+                    .child(menu);
+                year_cell = year_cell.child(gpui::deferred(anchored_menu).with_priority(10));
+            }
+            let year_radios = year_cell;
             let del_btn = Button::new(SharedString::from(format!("del-fld-{i}")))
                 .small()
                 .danger()
@@ -803,7 +894,14 @@ impl BatchSchedulerApp {
                                 .gap_2()
                                 .child(labeled_input("欄位名稱", &row.label_input))
                                 .child(labeled_input("欄位 ID", &row.id_input))
-                                .child(labeled_input("自行輸入（優先，可用 {E1} 等變數）", &row.custom_input)),
+                                .child(labeled_input("自行輸入（優先，可用 {E1} 等變數）", &row.custom_input))
+                                .child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap_3()
+                                        .child(div().text_xs().text_color(MUTED_FOREGROUND).child("年度格式"))
+                                        .child(div().w(px(130.)).child(year_radios)),
+                                ),
                         ),
                 );
             } else {
@@ -829,6 +927,7 @@ impl BatchSchedulerApp {
                         .child(div().flex_1().min_w(px(120.)).child(Input::new(&row.id_input).small()))
                         .child(div().w(px(240.)).flex_shrink_0().child(pick_btn))
                         .child(div().flex_1().min_w(px(200.)).child(Input::new(&row.custom_input).small()))
+                        .child(div().w(px(150.)).flex_shrink_0().child(year_radios))
                         .child(
                             h_flex()
                                 .w(px(80.))
@@ -920,10 +1019,22 @@ impl BatchSchedulerApp {
                             .text_color(MUTED_FOREGROUND)
                             .child("1. 上方維護程式；選一支程式後，下方逐欄位設定預設輸入值。")
                             .child("2. 有參數的欄位一定要設定好才能儲存：從下拉選單選擇，或在「自行輸入」欄填寫（填寫時優先採用）。")
-                            .child("3. 自行輸入可混用文字與日期變數，例如：DAVDF222.{E1} → DAVDF222.1151127")
-                            .child("4. 常用變數：{E1} 執行日、{E2}~{E8} 前1~7天、{ED} 當月(YYYMM)、{EE} 前月(YYYMM)")
-                            .child("5. 其他變數：{MONTH_FIRST} 月初、{MONTH_LAST} 月底、{DAY_OFFSET:+1} 偏移天數")
-                            .child("6. 也可寫中文：{執行日當天}、{執行日前1天}、{執行日後3天}、{執行日前月}、{執行日前月第1日}（名稱同下拉選單）"),
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child("3. 自行輸入可混用文字與日期變數，例如：DAVDF222.{E1} → DAVDF222.1151127，")
+                                    .child(
+                                        Button::new("param-help-open")
+                                            .small()
+                                            .label("詳參數設定說明")
+                                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                                this.param_help_open = true;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                            .child("4. 年度格式依欄位設定：民國年（預設）{E1} → 1151127、{ED} → 11511；西元年 {E1} → 20261127、{ED} → 202611"),
                     ),
             )
             // 工作代號 / 工作名稱 + 新增 修改 匯入
@@ -968,6 +1079,13 @@ impl BatchSchedulerApp {
                                 h_flex()
                                     .flex_wrap()
                                     .gap_2()
+                                    .child(
+                                        Button::new("btn-param-setting")
+                                            .label("參數設定")
+                                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                                this.open_param_setting(window, cx);
+                                            })),
+                                    )
                                     .child(
                                         Button::new("btn-add-field")
                                             .label("＋ 新增欄位")

@@ -160,6 +160,7 @@ fn extract_field_from_row(
             max_length,
             is_required,
             sort_order,
+            year_ad: false,
         });
     }
 

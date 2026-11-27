@@ -178,6 +178,8 @@ impl Render for BatchSchedulerApp {
             )
             .children(self.render_leave_prompt(cx))
             .children(self.render_interrupt_prompt(cx))
+            .children(self.render_param_setting(cx))
+            .children(self.render_param_help(cx))
             .children(Root::render_notification_layer(window, cx))
     }
 }

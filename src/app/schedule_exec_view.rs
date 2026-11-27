@@ -1,6 +1,6 @@
 //! 排程設定及執行畫面
 
-use super::helpers::radio_item;
+use super::helpers::{drag_handle, drag_over_style, radio_item, DragList, DragRow};
 use super::*;
 
 impl BatchSchedulerApp {
@@ -24,7 +24,13 @@ impl BatchSchedulerApp {
         };
 
         // ---- 群組清單 ----
-        let mut group_rows = v_flex().w_full().gap_2();
+        // 最多顯示約 6 筆，超過用滾輪捲動
+        let mut group_rows = v_flex()
+            .id("sx-group-list")
+            .w_full()
+            .max_h(px(360.))
+            .overflow_y_scroll()
+            .gap_2();
         if self.groups.is_empty() {
             group_rows = group_rows.child(
                 div()
@@ -144,7 +150,13 @@ impl BatchSchedulerApp {
         }
 
         // ---- 批次程式清單 ----
-        let mut prog_rows = v_flex().w_full().gap_1();
+        // 最多顯示約 6 筆，超過用滾輪捲動
+        let mut prog_rows = v_flex()
+            .id("sx-prog-list")
+            .w_full()
+            .max_h(px(200.))
+            .overflow_y_scroll()
+            .gap_1();
         if self.programs.is_empty() {
             prog_rows = prog_rows.child(
                 div()
@@ -230,6 +242,18 @@ impl BatchSchedulerApp {
                     .rounded_md()
                     .border_1()
                     .border_color(BORDER)
+                    .drag_over::<DragRow>(|style, d, _, _| drag_over_style(style, d, DragList::ExecEntry))
+                    .on_drop(cx.listener(move |this, d: &DragRow, _, cx| {
+                        if d.list == DragList::ExecEntry {
+                            this.move_exec_entry(d.id as usize, idx, cx);
+                        }
+                    }))
+                    .child(drag_handle(
+                        SharedString::from(format!("ex-drag-{idx}")),
+                        DragList::ExecEntry,
+                        idx as i64,
+                        format!("{}　{}", code, name),
+                    ))
                     .child(
                         div()
                             .w(px(28.))
@@ -310,31 +334,6 @@ impl BatchSchedulerApp {
                                         cx.notify();
                                     }))
                                     .child("發送mail通知"),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .flex_shrink_0()
-                            .gap_0()
-                            .child(
-                                Button::new(SharedString::from(format!("ex-up-{idx}")))
-                                    .small()
-                                    .ghost()
-                                    .w(px(30.))
-                                    .label("▲")
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.move_exec_entry(idx, true, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("ex-down-{idx}")))
-                                    .small()
-                                    .ghost()
-                                    .w(px(30.))
-                                    .label("▼")
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.move_exec_entry(idx, false, cx);
-                                    })),
                             ),
                     )
                     .child(

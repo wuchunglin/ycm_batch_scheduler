@@ -385,7 +385,7 @@ impl BatchSchedulerApp {
                                         .selected_item_params
                                         .iter()
                                         .filter(|p| p.is_configured)
-                                        .map(|p| format!("{}[{}]={}", p.label, p.html_id, r.resolve(&p.rule_code, &p.rule_value)))
+                                        .map(|p| format!("{}[{}]={}", p.label, p.html_id, r.resolve_with(&p.rule_code, &p.rule_value, YearFormat::from_ad(p.year_ad))))
                                         .collect();
                                     if vals.is_empty() {
                                         format!("步驟 {} 無專屬參數 (E1={})", sel_item.step_order, r.resolve("E1", ""))

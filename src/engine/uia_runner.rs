@@ -49,6 +49,7 @@ mod win_uia {
         ExecutionRequest, ExecutionStepInput, RunnerEvent, CANCEL_MSG,
     };
     use crate::engine::param_resolver::{ParamResolver, RocDateUtils};
+    use crate::engine::year_format::YearFormat;
     use crate::models::GeneratedScheduleItem;
 
     pub async fn execute_uia(
@@ -647,7 +648,11 @@ mod win_uia {
                 if !param.is_configured && param.rule_value.is_empty() {
                     continue;
                 }
-                resolver.resolve(&param.rule_code, &param.rule_value)
+                resolver.resolve_with(
+                    &param.rule_code,
+                    &param.rule_value,
+                    YearFormat::from_ad(param.year_ad),
+                )
             };
             set_id_value(s, &param.html_id, &val)?;
         }

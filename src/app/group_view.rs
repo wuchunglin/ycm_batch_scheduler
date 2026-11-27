@@ -1,7 +1,9 @@
 //! 群組編輯畫面與步驟詳細編輯器
 
 use super::*;
-use super::helpers::{flex_labeled_input, scope_pill, mode_pill, rule_badge};
+use super::helpers::{
+    drag_handle, drag_over_style, flex_labeled_input, mode_pill, rule_badge, scope_pill, DragList, DragRow,
+};
 
 impl BatchSchedulerApp {
     pub(super) fn render_group_view(&self, viewport_w: gpui::Pixels, cx: &mut Context<Self>) -> impl IntoElement {
@@ -226,10 +228,22 @@ impl BatchSchedulerApp {
                                                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                                         this.select_group_item(item_clone.clone(), window, cx);
                                                     }))
+                                                    .drag_over::<DragRow>(|style, d, _, _| drag_over_style(style, d, DragList::GroupStep))
+                                                    .on_drop(cx.listener(move |this, d: &DragRow, window, cx| {
+                                                        if d.list == DragList::GroupStep {
+                                                            this.move_group_item(d.id, iid, window, cx);
+                                                        }
+                                                    }))
                                                     .child(
                                                         h_flex()
                                                             .gap_3()
                                                             .items_center()
+                                                            .child(drag_handle(
+                                                                SharedString::from(format!("step-drag-{iid}")),
+                                                                DragList::GroupStep,
+                                                                iid,
+                                                                format!("{}　{}", code, name),
+                                                            ))
                                                             .child(
                                                                 div()
                                                                     .w(px(28.))
@@ -264,32 +278,6 @@ impl BatchSchedulerApp {
                                                             } else {
                                                                 Tag::secondary().child("獨立")
                                                             })
-                                                            .child(
-                                                                Button::new(SharedString::from(format!("up-step-{iid}")))
-                                                                    .ghost()
-                                                                    .label("↑")
-                                                                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                                                        {
-                                                                            let guard = this.conn.lock().unwrap();
-                                                                            let repo = Repository::new(&guard);
-                                                                            let _ = repo.swap_group_item_order(gid, iid, true);
-                                                                        }
-                                                                        this.reload_groups(window, cx);
-                                                                    })),
-                                                            )
-                                                            .child(
-                                                                Button::new(SharedString::from(format!("dn-step-{iid}")))
-                                                                    .ghost()
-                                                                    .label("↓")
-                                                                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                                                        {
-                                                                            let guard = this.conn.lock().unwrap();
-                                                                            let repo = Repository::new(&guard);
-                                                                            let _ = repo.swap_group_item_order(gid, iid, false);
-                                                                        }
-                                                                        this.reload_groups(window, cx);
-                                                                    })),
-                                                            )
                                                             .child(
                                                                 Button::new(SharedString::from(format!("rm-step-{iid}")))
                                                                     .danger()
@@ -407,7 +395,13 @@ impl BatchSchedulerApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let param_val_str = self.param_rule_value_input.read(cx).value().to_string();
-        let preview_param_val = resolver.resolve(&self.param_rule_code, &param_val_str);
+        // 試算依正在編輯的欄位年度格式（找不到欄位時以民國年）
+        let editing_fmt = self
+            .param_editing_field_id
+            .and_then(|fid| self.selected_item_params.iter().find(|p| p.field_id == fid))
+            .map(|p| YearFormat::from_ad(p.year_ad))
+            .unwrap_or_default();
+        let preview_param_val = resolver.resolve_with(&self.param_rule_code, &param_val_str, editing_fmt);
 
         v_flex()
             .w_full()
@@ -638,7 +632,7 @@ impl BatchSchedulerApp {
                         for p in &self.selected_item_params {
                             let p_clone = p.clone();
                             let fid = p.field_id;
-                            let preview = resolver.resolve(&p.rule_code, &p.rule_value);
+                            let preview = resolver.resolve_with(&p.rule_code, &p.rule_value, YearFormat::from_ad(p.year_ad));
                             table = table.child(
                                 h_flex()
                                     .p_2()

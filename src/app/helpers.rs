@@ -16,6 +16,87 @@ pub(super) fn parse_hhmm(raw: &str) -> Option<String> {
 
 // ---------------- Helper Components ----------------
 
+// ---------------- 拖曳排序 ----------------
+
+/// 可拖曳排序的清單種類（避免把 A 清單的列拖到 B 清單）
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DragList {
+    /// 群組編輯畫面的步驟
+    GroupStep,
+    /// 群組設定畫面「群組內的批次程式」
+    GroupSetup,
+    /// 排程設定及執行的「執行清單」（id = 清單索引）
+    ExecEntry,
+    /// 參數設定的預設輸入值選項
+    DefaultValue,
+}
+
+/// 拖曳中的資料；同時作為拖曳時跟著游標的預覽元件
+#[derive(Clone)]
+pub(super) struct DragRow {
+    pub list: DragList,
+    pub id: i64,
+    pub label: SharedString,
+}
+
+impl Render for DragRow {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .bg(SECONDARY)
+            .border_1()
+            .border_color(PRIMARY)
+            .text_size(px(14.))
+            .text_color(FOREGROUND)
+            .child(self.label.clone())
+    }
+}
+
+/// 列左側的拖曳把手：按住把手拖曳到其他列即可調整順序
+pub(super) fn drag_handle(
+    id: SharedString,
+    list: DragList,
+    row_id: i64,
+    label: String,
+) -> gpui::Stateful<gpui::Div> {
+    let payload = DragRow {
+        list,
+        id: row_id,
+        label: SharedString::from(label),
+    };
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .px_1()
+        .text_color(MUTED_FOREGROUND)
+        .cursor_move()
+        .child("≡")
+        .on_drag(payload, |d, _offset, _window, cx| cx.new(|_| d.clone()))
+}
+
+/// 拖曳經過某列時的高亮樣式（只對同一種清單生效）
+pub(super) fn drag_over_style(
+    style: gpui::StyleRefinement,
+    dragged: &DragRow,
+    list: DragList,
+) -> gpui::StyleRefinement {
+    if dragged.list == list {
+        style.bg(SECONDARY).border_color(PRIMARY)
+    } else {
+        style
+    }
+}
+
+/// 把 from 位置的元素移到 to 位置（其餘順延）
+pub(super) fn move_vec_item<T>(v: &mut Vec<T>, from: usize, to: usize) {
+    if from < v.len() && to < v.len() && from != to {
+        let item = v.remove(from);
+        v.insert(to, item);
+    }
+}
+
 pub(super) fn nav_vertical(
     id: &'static str,
     title: &'static str,

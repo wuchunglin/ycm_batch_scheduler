@@ -4,6 +4,7 @@ mod group;
 mod group_setup_view;
 mod date_picker;
 mod group_view;
+mod param_setting;
 mod helpers;
 mod program;
 mod render;
@@ -48,6 +49,7 @@ use ycm_batch_scheduler::engine::browser_runner::{
     ExecutionStepInput, RunnerEvent,
 };
 use ycm_batch_scheduler::engine::param_resolver::{ParamResolver, RocDateUtils};
+use ycm_batch_scheduler::engine::year_format::YearFormat;
 use ycm_batch_scheduler::engine::schedule_gen::ScheduleGenerator;
 use ycm_batch_scheduler::models::{
     CustomVariable, DateRangeMode, DefaultValue, GeneratedScheduleItem, GroupItem, GroupItemParamDetail,
@@ -85,6 +87,8 @@ struct FieldRow {
     default_id: Option<i64>,
     /// 自行輸入的預設值（可用 {E1} 等樣板；有填寫時優先於下拉選單）
     custom_input: Entity<InputState>,
+    /// 年度格式（每個欄位各自設定）：false = 民國年（預設）、true = 西元年
+    year_ad: bool,
 }
 
 /// 預覽頁一列可修改的參數
@@ -161,6 +165,9 @@ pub struct BatchSchedulerApp {
     field_rows: Vec<FieldRow>,
     field_rows_dirty: bool,
     open_picker: Option<usize>,
+    /// 展開中的「年度格式」下拉選單（欄位列索引）
+    open_year_picker: Option<usize>,
+    year_picker_closed_by: Option<(usize, gpui::Point<gpui::Pixels>)>,
     /// 剛被「點選外部」關閉的下拉選單（列索引, 滑鼠位置），避免同一次點擊又被欄位重新打開
     picker_closed_by: Option<(usize, gpui::Point<gpui::Pixels>)>,
     /// 下拉選單的焦點（展開時取得焦點，才能接收 Esc）
@@ -168,6 +175,19 @@ pub struct BatchSchedulerApp {
     default_values: Vec<DefaultValue>,
     field_defaults: HashMap<i64, i64>,
     prog_stats: HashMap<i64, (usize, usize)>,
+
+    // --- 參數設定（維護下拉選單選項）State ---
+    pd_open: bool,
+    /// 「參數設定說明」彈窗是否開啟
+    param_help_open: bool,
+    /// 正在修改的選項 id；None = 新增
+    pd_editing: Option<i64>,
+    pd_name_input: Entity<InputState>,
+    pd_value_input: Entity<InputState>,
+    /// 規則類型（見 param_setting.rs 的 PD_RULES）
+    pd_rule: String,
+    /// 等待確認刪除的 (選項 id, 使用中的欄位數)
+    pd_confirm_delete: Option<(i64, i64)>,
 
     // --- Group Editor State ---
     groups: Vec<JobGroup>,
