@@ -343,6 +343,21 @@ impl<'a> Repository<'a> {
         Ok(list)
     }
 
+    /// 「自行輸入」的預設值：以 "自訂：<內容>" 為名建立（已存在則重用），規則為 CUSTOM_TEMPLATE
+    pub fn ensure_custom_default(&self, text: &str) -> Result<i64> {
+        let name = format!("自訂：{text}");
+        self.conn.execute(
+            "INSERT OR IGNORE INTO default_values (name, rule_code, rule_value) VALUES (?1, 'CUSTOM_TEMPLATE', ?2)",
+            params![name, text],
+        )?;
+        let id: i64 = self.conn.query_row(
+            "SELECT id FROM default_values WHERE name = ?1",
+            params![name],
+            |r| r.get(0),
+        )?;
+        Ok(id)
+    }
+
     /// field_id -> default_id
     pub fn field_defaults_for_program(&self, program_id: i64) -> Result<HashMap<i64, i64>> {
         let mut stmt = self.conn.prepare(

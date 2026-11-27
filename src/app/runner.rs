@@ -80,6 +80,7 @@ impl BatchSchedulerApp {
             steps,
             schedule_dates,
             custom_vars,
+            param_overrides: HashMap::new(),
         };
         self.launch_execution(req, cx);
     }
@@ -113,6 +114,10 @@ impl BatchSchedulerApp {
         let total = req.schedule_dates.len() * steps_per_date;
         self.runner_state.is_running = true;
         self.runner_state.failed = false;
+        self.runner_state.cancelled = false;
+        reset_cancel();
+        self.interrupt_prompt = false;
+        self.interrupt_requested = false;
         self.runner_state.captured_sns.clear();
         self.runner_state.reset_logs();
         self.runner_state.steps_per_date = steps_per_date;

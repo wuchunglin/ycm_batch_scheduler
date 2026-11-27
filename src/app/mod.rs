@@ -27,6 +27,7 @@ use gpui::{
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
+    Sizable,
     checkbox::Checkbox,
     h_flex,
     input::{Input, InputState},
@@ -43,7 +44,7 @@ use crate::theme::{
 };
 use ycm_batch_scheduler::db::repository::Repository;
 use ycm_batch_scheduler::engine::browser_runner::{
-    append_file_log, current_log_file_path, execute_group, BrowserRunnerConfig, ExecutionRequest,
+    append_file_log, current_log_file_path, execute_group, request_cancel, reset_cancel, BrowserRunnerConfig, ExecutionRequest,
     ExecutionStepInput, RunnerEvent,
 };
 use ycm_batch_scheduler::engine::param_resolver::{ParamResolver, RocDateUtils};
@@ -82,16 +83,42 @@ struct FieldRow {
     label_input: Entity<InputState>,
     id_input: Entity<InputState>,
     default_id: Option<i64>,
+    /// 自行輸入的預設值（可用 {E1} 等樣板；有填寫時優先於下拉選單）
+    custom_input: Entity<InputState>,
+}
+
+/// 預覽頁一列可修改的參數
+struct ExecParamRow {
+    field_id: i64,
+    label: String,
+    default_name: String,
+    configured: bool,
+    /// 依預設輸入值轉換出的原值（用來判斷是否被修改）
+    resolved: String,
+    input: Entity<InputState>,
+}
+
+/// 群組設定頁中，群組內一筆批次程式的編輯狀態
+struct GsItemEdit {
+    item_id: i64,
+    time_input: Entity<InputState>,
+    link_prev: bool,
+    req_email: bool,
 }
 
 /// 「執行清單」中的一筆批次程式（可調整順序、預計執行時間、前置工作序號、發送mail通知）
 struct ExecEntry {
     program_id: i64,
-    /// Some(群組 id)：由勾選群組帶入；None：直接勾選批次程式
+    /// Some(群組 id)：由群組帶入（群組被刪除時用來一併移除）；None：單獨加入的批次程式
     source_group: Option<i64>,
     time_input: Entity<InputState>,
     link_prev: bool,
     req_email: bool,
+}
+
+/// 由「自行輸入」自動建立的預設值（名稱以「自訂：」開頭、規則為 CUSTOM_TEMPLATE）
+pub(crate) fn is_custom_default(d: &DefaultValue) -> bool {
+    d.rule_code == "CUSTOM_TEMPLATE" && d.name.starts_with("自訂：")
 }
 
 const RULE_CODES: &[&str] = &[
@@ -176,14 +203,18 @@ pub struct BatchSchedulerApp {
 
     // --- Group Setup (新增批次到群組) State ---
     gs_selected_program: Option<i64>,
-    gs_time_input: Entity<InputState>,
-    gs_link_prev: bool,
-    gs_req_email: bool,
+    /// 群組內每個批次程式可編輯的欄位（預計執行時間 / 前置工作序號 / 發送mail通知），按「儲存變更」才寫入資料庫
+    gs_edits: Vec<GsItemEdit>,
+    /// gs_edits 目前對應的群組 id（切換群組時重建）
+    gs_edits_group: Option<i64>,
+    /// 離開群組設定頁時發現有未儲存的變更：暫存使用者要前往的頁籤，並顯示確認視窗
+    leave_prompt: Option<NavTab>,
 
     // --- 執行清單 (排程設定及執行頁) ---
     exec_entries: Vec<ExecEntry>,
-    exec_sel_groups: HashSet<i64>,
-    exec_sel_programs: HashSet<i64>,
+    /// 群組清單 / 批次程式清單目前點選（反白）的列，供標題列「加入執行清單」使用
+    exec_pick_group: Option<i64>,
+    exec_pick_program: Option<i64>,
     /// 年度別：Some(115/116)；None = 時間區間
     exec_year: Option<i32>,
     exec_range_start_input: Entity<InputState>,
@@ -210,6 +241,13 @@ pub struct BatchSchedulerApp {
     exec_cal_open: Option<CalTarget>,
     exec_cal_ym: (i32, u32),
     exec_cal_closed_by: Option<(CalTarget, gpui::Point<gpui::Pixels>)>,
+    /// 預覽頁每個執行項目的可修改參數列（與 exec_entries 同順序）
+    exec_param_rows: Vec<Vec<ExecParamRow>>,
+    /// exec_param_rows 目前對應的排程日期（roc_date_raw）
+    exec_param_date: String,
+    exec_param_dirty: bool,
+    /// 手動修改過的參數：(roc_date_raw, program_id, field_id) -> 值
+    exec_param_overrides: HashMap<(String, i64, i64), String>,
 
     // --- Schedule Rule State ---
     available_years: Vec<i32>,
@@ -225,6 +263,10 @@ pub struct BatchSchedulerApp {
     // --- Runner State ---
     runner_state: RunnerViewState,
     runner_dry_run: bool,
+    /// 按「中斷」後的確認視窗是否顯示
+    interrupt_prompt: bool,
+    /// 已確認中斷、等待執行引擎停止
+    interrupt_requested: bool,
     runner_override_date_input: Entity<InputState>,
 
     // --- Settings & Variables State ---

@@ -43,7 +43,7 @@ impl BatchSchedulerApp {
         let mut app = Self {
             conn,
             tokio_rt,
-            active_tab: NavTab::ProgramManager,
+            active_tab: NavTab::ScheduleExec,
 
             programs: Vec::new(),
             selected_program: None,
@@ -75,8 +75,8 @@ impl BatchSchedulerApp {
             new_group_desc_input: cx
                 .new(|cx| InputState::new(window, cx).placeholder("群組說明")),
             exec_entries: Vec::new(),
-            exec_sel_groups: HashSet::new(),
-            exec_sel_programs: HashSet::new(),
+            exec_pick_group: None,
+            exec_pick_program: None,
             exec_year: Some(115),
             exec_range_start_input: cx
                 .new(|cx| InputState::new(window, cx).placeholder("YYY/MM/DD")),
@@ -95,19 +95,19 @@ impl BatchSchedulerApp {
             exec_cal_open: None,
             exec_cal_ym: (Local::now().date_naive().year(), Local::now().date_naive().month()),
             exec_cal_closed_by: None,
+            exec_param_rows: Vec::new(),
+            exec_param_date: String::new(),
+            exec_param_dirty: true,
+            exec_param_overrides: HashMap::new(),
             exec_specific_inputs: (0..5)
                 .map(|_| {
                     cx.new(|cx| InputState::new(window, cx).placeholder("YYY/MM/DD"))
                 })
                 .collect(),
             gs_selected_program: None,
-            gs_time_input: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("HH:MM")
-                    .default_value("13:00")
-            }),
-            gs_link_prev: false,
-            gs_req_email: true,
+            gs_edits: Vec::new(),
+            gs_edits_group: None,
+            leave_prompt: None,
             item_exe_time_input: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("HH:mm (空白=當下時間)")
@@ -193,6 +193,8 @@ impl BatchSchedulerApp {
 
             runner_state: RunnerViewState::default(),
             runner_dry_run: true,
+            interrupt_prompt: false,
+            interrupt_requested: false,
             runner_override_date_input: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("選填：單日測試 (yyy/MM/dd)，空白則依群組排程展開")
@@ -284,6 +286,7 @@ impl BatchSchedulerApp {
         self.groups = groups;
         self.selected_group = selected_group;
         self.group_items = items;
+        self.sync_gs_edits(window, cx);
 
         if let Some(ref g) = self.selected_group {
             if let Ok(rule) = serde_json::from_str::<ScheduleRule>(&g.schedule_rule_json) {
@@ -304,6 +307,82 @@ impl BatchSchedulerApp {
             self.selected_item = None;
             self.selected_item_params.clear();
         }
+        cx.notify();
+    }
+
+    /// 依目前群組內容重建「群組內批次程式」的編輯狀態。
+    /// 同一個群組重新載入時（加入 / 移除 / 調整順序），保留使用者尚未儲存的修改。
+    pub(super) fn sync_gs_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let gid = self.selected_group.as_ref().and_then(|g| g.id);
+        let mut old: HashMap<i64, GsItemEdit> = if gid.is_some() && gid == self.gs_edits_group {
+            std::mem::take(&mut self.gs_edits)
+                .into_iter()
+                .map(|e| (e.item_id, e))
+                .collect()
+        } else {
+            self.gs_edits.clear();
+            HashMap::new()
+        };
+        let mut edits = Vec::new();
+        for it in &self.group_items {
+            let Some(item_id) = it.id else { continue };
+            if let Some(e) = old.remove(&item_id) {
+                edits.push(e);
+                continue;
+            }
+            let time = it.expect_exe_time.clone();
+            let time_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("HH:MM")
+                    .default_value(time)
+            });
+            edits.push(GsItemEdit {
+                item_id,
+                time_input,
+                link_prev: it.link_prev_sn,
+                req_email: it.req_email,
+            });
+        }
+        self.gs_edits = edits;
+        self.gs_edits_group = gid;
+    }
+
+    /// 群組內批次程式是否有尚未儲存的變更
+    pub(super) fn gs_dirty(&self, cx: &gpui::App) -> bool {
+        self.gs_edits.iter().any(|e| {
+            self.group_items
+                .iter()
+                .find(|i| i.id == Some(e.item_id))
+                .map_or(false, |it| {
+                    e.time_input.read(cx).value().trim() != it.expect_exe_time.trim()
+                        || e.link_prev != it.link_prev_sn
+                        || e.req_email != it.req_email
+                })
+        })
+    }
+
+    /// 要求切換頁籤：若正在群組設定頁且有未儲存的變更，先跳出確認視窗
+    pub(super) fn request_nav(&mut self, target: NavTab, cx: &mut Context<Self>) {
+        if self.runner_state.is_running {
+            return;
+        }
+        if self.active_tab == NavTab::GroupSetup && self.gs_dirty(cx) {
+            self.leave_prompt = Some(target);
+            cx.notify();
+            return;
+        }
+        self.finish_nav(target, cx);
+    }
+
+    /// 實際切換頁籤（離開群組設定頁時一併捨棄編輯狀態）
+    pub(super) fn finish_nav(&mut self, target: NavTab, cx: &mut Context<Self>) {
+        if self.active_tab == NavTab::GroupSetup {
+            self.gs_edits.clear();
+            self.gs_edits_group = None;
+        }
+        self.leave_prompt = None;
+        self.exec_console_mode = false;
+        self.active_tab = target;
         cx.notify();
     }
 
@@ -375,12 +454,26 @@ impl BatchSchedulerApp {
                     .placeholder("欄位 ID")
                     .default_value(html_id)
             });
-            let default_id = f.id.and_then(|id| self.field_defaults.get(&id).copied());
+            let mut default_id = f.id.and_then(|id| self.field_defaults.get(&id).copied());
+            // 預設值若是「自行輸入」建立的（自訂：xxx），還原成自行輸入框內容
+            let mut custom_text = String::new();
+            if let Some(d) = default_id.and_then(|i| self.default_values.iter().find(|d| d.id == Some(i))) {
+                if is_custom_default(d) {
+                    custom_text = d.rule_value.clone();
+                    default_id = None;
+                }
+            }
+            let custom_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("自行輸入，如 DAVDF222.{E1}")
+                    .default_value(custom_text)
+            });
             rows.push(FieldRow {
                 base: Some(f),
                 label_input,
                 id_input,
                 default_id,
+                custom_input,
             });
         }
         self.field_rows = rows;

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::io::Write;
 
 use chrono::Local;
@@ -40,6 +41,25 @@ pub enum RunnerEvent {
     Failed {
         error: String,
     },
+    /// 使用者按「中斷」並確認後，執行已停止
+    Cancelled,
+}
+
+/// 使用者要求中斷執行（由畫面設定，執行引擎在每個步驟與等待迴圈中檢查）
+static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// 中斷時使用的錯誤訊息（用來辨識「使用者中斷」與一般錯誤）
+pub const CANCEL_MSG: &str = "使用者中斷執行";
+
+pub fn request_cancel() {
+    CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+pub fn reset_cancel() {
+    CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+pub fn is_cancelled() -> bool {
+    CANCEL_REQUESTED.load(Ordering::SeqCst)
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +86,8 @@ pub struct ExecutionRequest {
     pub steps: Vec<ExecutionStepInput>,
     pub schedule_dates: Vec<GeneratedScheduleItem>,
     pub custom_vars: HashMap<String, String>,
+    /// 預覽頁手動修改的參數值：(排程日期 roc_date_raw, program_id, field_id) -> 值
+    pub param_overrides: HashMap<(String, i64, i64), String>,
 }
 
 pub fn current_log_file_path() -> String {
@@ -164,9 +186,14 @@ pub async fn execute_group(req: ExecutionRequest, tx: UnboundedSender<RunnerEven
     });
 
     if let Err(err) = crate::engine::uia_runner::execute_uia(&req, &tx, total_ops).await {
-        emit_log(&tx, "ERROR", format!("自動化執行中斷：{err}"));
-        let _ = tx.send(RunnerEvent::Failed {
-            error: err.to_string(),
-        });
+        if is_cancelled() || err.to_string().contains(CANCEL_MSG) {
+            emit_log(&tx, "WARN", "使用者已中斷執行，後續排程不再執行");
+            let _ = tx.send(RunnerEvent::Cancelled);
+        } else {
+            emit_log(&tx, "ERROR", format!("自動化執行中斷：{err}"));
+            let _ = tx.send(RunnerEvent::Failed {
+                error: err.to_string(),
+            });
+        }
     }
 }

@@ -9,6 +9,10 @@ impl Render for BatchSchedulerApp {
             self.rebuild_field_rows(window, cx);
             self.field_rows_dirty = false;
         }
+        if self.active_tab == NavTab::ExecPreview && !self.exec_console_mode && self.exec_param_dirty {
+            self.rebuild_exec_param_rows(window, cx);
+            self.exec_param_dirty = false;
+        }
         let active = self.active_tab;
         let viewport_w = window.viewport_size().width;
         let is_narrow = viewport_w < px(860.);
@@ -18,6 +22,7 @@ impl Render for BatchSchedulerApp {
 
         v_flex()
             .size_full()
+            .relative()
             .bg(BACKGROUND)
             .text_color(FOREGROUND)
             // Top Header Bar
@@ -71,7 +76,7 @@ impl Render for BatchSchedulerApp {
                                     .child(format!(
                                         "程式: {} 支 | 預設值: {} 項",
                                         self.programs.len(),
-                                        self.default_values.len()
+                                        self.default_values.iter().filter(|d| !is_custom_default(d)).count()
                                     )),
                             ),
                     ),
@@ -96,45 +101,30 @@ impl Render for BatchSchedulerApp {
                             .justify_start()
                             .items_center()
                             .child(nav_vertical(
-                                "nav-prog",
-                                "批次程式新增",
-                                active == NavTab::ProgramManager,
-                                locked,
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    if this.runner_state.is_running {
-                                        return;
-                                    }
-                                    this.exec_console_mode = false;
-                                    this.active_tab = NavTab::ProgramManager;
-                                    cx.notify();
-                                }),
-                            ))
-                            .child(nav_vertical(
                                 "nav-exec",
                                 "排程設定及執行",
                                 matches!(active, NavTab::ScheduleExec | NavTab::ExecPreview | NavTab::GroupSetup),
                                 locked,
                                 cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    if this.runner_state.is_running {
-                                        return;
-                                    }
-                                    this.exec_console_mode = false;
-                                    this.active_tab = NavTab::ScheduleExec;
-                                    cx.notify();
+                                    this.request_nav(NavTab::ScheduleExec, cx);
+                                }),
+                            ))
+                            .child(nav_vertical(
+                                "nav-prog",
+                                "批次程式新增",
+                                active == NavTab::ProgramManager,
+                                locked,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.request_nav(NavTab::ProgramManager, cx);
                                 }),
                             ))
                             .child(nav_vertical(
                                 "nav-settings",
-                                "設定",
+                                "參數設定",
                                 active == NavTab::Settings,
                                 locked,
                                 cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    if this.runner_state.is_running {
-                                        return;
-                                    }
-                                    this.exec_console_mode = false;
-                                    this.active_tab = NavTab::Settings;
-                                    cx.notify();
+                                    this.request_nav(NavTab::Settings, cx);
                                 }),
                             )),
                     )
@@ -186,6 +176,156 @@ impl Render for BatchSchedulerApp {
                             .into_any_element()
                     }),
             )
+            .children(self.render_leave_prompt(cx))
+            .children(self.render_interrupt_prompt(cx))
             .children(Root::render_notification_layer(window, cx))
+    }
+}
+
+impl BatchSchedulerApp {
+    /// 執行中按「中斷」：詢問「確定中斷 / 取消」
+    fn render_interrupt_prompt(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !(self.interrupt_prompt && self.runner_state.is_running) {
+            return None;
+        }
+        Some(
+            div()
+                .id("interrupt-prompt-overlay")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(hsl(0.0, 0.0, 0.0).opacity(0.45))
+                .occlude()
+                .child(
+                    v_flex()
+                        .w(px(420.))
+                        .p_5()
+                        .gap_4()
+                        .bg(CARD)
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(BORDER)
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::BOLD)
+                                .child("確定要中斷排程執行嗎？"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(MUTED_FOREGROUND)
+                                .child("中斷後，尚未執行的排程將不再執行；已送出（F8）的作業無法復原。"),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("interrupt-cancel")
+                                        .ghost()
+                                        .label("取消")
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.interrupt_prompt = false;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("interrupt-confirm")
+                                        .danger()
+                                        .label("確定中斷")
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            if this.runner_state.is_running {
+                                                request_cancel();
+                                                this.interrupt_requested = true;
+                                                this.runner_state.current_step = "中斷中...".to_string();
+                                            }
+                                            this.interrupt_prompt = false;
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// 離開群組設定頁時，若有未儲存的變更：顯示「儲存變更並離開 / 不儲存離開 / 取消」確認視窗
+    fn render_leave_prompt(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let target = self.leave_prompt?;
+        Some(
+            div()
+                .id("leave-prompt-overlay")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(hsl(0.0, 0.0, 0.0).opacity(0.45))
+                .occlude()
+                .child(
+                    v_flex()
+                        .w(px(420.))
+                        .p_5()
+                        .gap_4()
+                        .bg(CARD)
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(BORDER)
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::BOLD)
+                                .child("群組內的批次程式有未儲存的變更"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(MUTED_FOREGROUND)
+                                .child("要先儲存變更再離開，還是直接離開（變更將不會被儲存）？"),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("leave-cancel")
+                                        .ghost()
+                                        .label("取消")
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.leave_prompt = None;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("leave-discard")
+                                        .danger()
+                                        .label("離開")
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                            this.finish_nav(target, cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("leave-save")
+                                        .primary()
+                                        .label("儲存變更並離開")
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                            if this.save_group_item_changes(window, cx) {
+                                                this.finish_nav(target, cx);
+                                            }
+                                        })),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 }

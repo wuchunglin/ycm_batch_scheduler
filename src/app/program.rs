@@ -196,7 +196,11 @@ impl BatchSchedulerApp {
             return;
         }
         // 有參數一定要選預設輸入值：前面的列沒選完，不能再新增下一列
-        if let Some(pos) = self.field_rows.iter().position(|r| r.default_id.is_none()) {
+        if let Some(pos) = self
+            .field_rows
+            .iter()
+            .position(|r| r.default_id.is_none() && r.custom_input.read(cx).value().trim().is_empty())
+        {
             let label = self.field_rows[pos].label_input.read(cx).value().trim().to_string();
             let shown = if label.is_empty() { String::new() } else { format!("「{label}」") };
             window.push_notification(
@@ -210,11 +214,15 @@ impl BatchSchedulerApp {
         }
         let label_input = cx.new(|cx| InputState::new(window, cx).placeholder("欄位名稱"));
         let id_input = cx.new(|cx| InputState::new(window, cx).placeholder("欄位 ID"));
+        let custom_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("自行輸入，如 DAVDF222.{E1}")
+        });
         self.field_rows.push(FieldRow {
             base: None,
             label_input,
             id_input,
             default_id: None,
+            custom_input,
         });
         cx.notify();
     }
@@ -245,16 +253,17 @@ impl BatchSchedulerApp {
             window.push_notification(Notification::error("請先選取批次程式"), cx);
             return;
         };
-        let mut entries: Vec<(Option<ProgramField>, String, String, Option<i64>)> = Vec::new();
+        let mut entries: Vec<(Option<ProgramField>, String, String, Option<i64>, String)> = Vec::new();
         for row in &self.field_rows {
             let label = row.label_input.read(cx).value().trim().to_string();
             let html_id = row.id_input.read(cx).value().trim().to_string();
-            entries.push((row.base.clone(), label, html_id, row.default_id));
+            let custom = row.custom_input.read(cx).value().trim().to_string();
+            entries.push((row.base.clone(), label, html_id, row.default_id, custom));
         }
 
         let mut seen_labels: HashSet<String> = HashSet::new();
         let mut seen_ids: HashSet<String> = HashSet::new();
-        for (i, (_, label, html_id, _)) in entries.iter().enumerate() {
+        for (i, (_, label, html_id, _, _)) in entries.iter().enumerate() {
             let n = i + 1;
             if label.is_empty() || html_id.is_empty() {
                 window.push_notification(
@@ -280,13 +289,13 @@ impl BatchSchedulerApp {
         }
 
         // 有參數一定要選預設輸入值，否則不能儲存（單列修改只檢查該列）
-        for (i, (_, label, _, default_id)) in entries.iter().enumerate() {
+        for (i, (_, label, _, default_id, custom)) in entries.iter().enumerate() {
             if let Some(o) = only {
                 if o != i {
                     continue;
                 }
             }
-            if default_id.is_none() {
+            if default_id.is_none() && custom.is_empty() {
                 window.push_notification(
                     Notification::error(format!(
                         "第 {} 列欄位「{label}」尚未選擇預設輸入值，請選擇後再儲存",
@@ -303,7 +312,7 @@ impl BatchSchedulerApp {
         {
             let guard = self.conn.lock().unwrap();
             let repo = Repository::new(&guard);
-            for (i, (base, label, html_id, default_id)) in entries.iter().enumerate() {
+            for (i, (base, label, html_id, default_id, custom)) in entries.iter().enumerate() {
                 if let Some(o) = only {
                     if o != i {
                         continue;
@@ -344,7 +353,20 @@ impl BatchSchedulerApp {
                         let mut saved_field = field.clone();
                         saved_field.id = Some(fid);
                         saved.push((i, saved_field));
-                        if let Err(e) = repo.set_field_default(fid, *default_id) {
+                        // 有自行輸入內容時優先採用（自動建立 CUSTOM_TEMPLATE 預設值）
+                        let eff_default = if custom.is_empty() {
+                            Ok(*default_id)
+                        } else {
+                            repo.ensure_custom_default(custom).map(Some)
+                        };
+                        let eff_default = match eff_default {
+                            Ok(d) => d,
+                            Err(e) => {
+                                err = Some(format!("儲存自行輸入值失敗：{e}"));
+                                break;
+                            }
+                        };
+                        if let Err(e) = repo.set_field_default(fid, eff_default) {
                             err = Some(format!("儲存預設輸入值失敗：{e}"));
                             break;
                         }
@@ -514,6 +536,7 @@ impl BatchSchedulerApp {
                                 )
                                 .child(
                                     Button::new(SharedString::from(format!("del-prog-{pid}")))
+                                        .small()
                                         .danger()
                                         .label("刪除")
                                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -540,7 +563,7 @@ impl BatchSchedulerApp {
                         .items_center()
                         .gap_2()
                         .px_2()
-                        .py_1()
+                        .py_0p5()
                         .text_size(px(14.))
                         .rounded_md()
                         .bg(if is_sel { SECONDARY } else { BACKGROUND })
@@ -553,7 +576,7 @@ impl BatchSchedulerApp {
                                 .min_w_0()
                                 .items_center()
                                 .gap_2()
-                                .py_1()
+                                .py_0p5()
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                     this.select_program(p_select.clone(), window, cx);
@@ -572,6 +595,7 @@ impl BatchSchedulerApp {
                         .child(
                             div().w(px(70.)).flex_shrink_0().child(
                                 Button::new(SharedString::from(format!("del-prog-{pid}")))
+                                    .small()
                                     .danger()
                                     .label("刪除")
                                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -604,7 +628,8 @@ impl BatchSchedulerApp {
                     .child(div().w(px(32.)).flex_shrink_0().child("#"))
                     .child(div().flex_1().min_w(px(120.)).child("欄位名稱"))
                     .child(div().flex_1().min_w(px(120.)).child("欄位 ID"))
-                    .child(div().w(px(320.)).flex_shrink_0().child("預設輸入值"))
+                    .child(div().w(px(240.)).flex_shrink_0().child("預設輸入值（下拉）"))
+                    .child(div().flex_1().min_w(px(200.)).child("自行輸入（優先，可用 {E1} 等變數）"))
                     .child(div().w(px(80.)).flex_shrink_0().child("操作")),
             );
         }
@@ -619,13 +644,18 @@ impl BatchSchedulerApp {
             );
         }
         for (i, row) in self.field_rows.iter().enumerate() {
-            let def_label = self.default_name(row.default_id);
+            let has_custom = !row.custom_input.read(cx).value().trim().is_empty();
+            let def_label = if has_custom {
+                "（以右側自行輸入為準）".to_string()
+            } else {
+                self.default_name(row.default_id)
+            };
             let picker_open = self.open_picker == Some(i);
             let pick_btn = {
                 let trigger = h_flex()
                     .id(SharedString::from(format!("pick-{i}")))
                     .w_full()
-                    .h(px(32.))
+                    .h(px(28.))
                     .px_3()
                     .items_center()
                     .justify_between()
@@ -633,7 +663,7 @@ impl BatchSchedulerApp {
                     .border_1()
                     .border_color(if picker_open {
                         PRIMARY
-                    } else if row.default_id.is_none() {
+                    } else if row.default_id.is_none() && !has_custom {
                         DANGER
                     } else {
                         BORDER
@@ -664,8 +694,8 @@ impl BatchSchedulerApp {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(if row.default_id.is_none() { DANGER } else { FOREGROUND })
-                            .child(if row.default_id.is_none() {
+                            .text_color(if row.default_id.is_none() && !has_custom { DANGER } else { FOREGROUND })
+                            .child(if row.default_id.is_none() && !has_custom {
                                 "請選擇預設輸入值".to_string()
                             } else {
                                 def_label
@@ -705,15 +735,18 @@ impl BatchSchedulerApp {
                                 cx.notify();
                             }
                         }));
-                    for d in &self.default_values {
+                    for d in self.default_values.iter().filter(|d| !is_custom_default(d)) {
                         let did = d.id;
                         menu = menu.child(dropdown_item(
                             SharedString::from(format!("pk-{i}-{}", did.unwrap_or(0))),
                             &d.name,
-                            row.default_id == did,
-                            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            row.default_id == did && !has_custom,
+                            cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 if let Some(r) = this.field_rows.get_mut(i) {
                                     r.default_id = did;
+                                    // 改選下拉項目 → 清掉自行輸入，避免兩者衝突
+                                    r.custom_input
+                                        .update(cx, |s, cx| s.set_value("", window, cx));
                                 }
                                 this.open_picker = None;
                                 cx.notify();
@@ -725,6 +758,7 @@ impl BatchSchedulerApp {
                 cell
             };
             let del_btn = Button::new(SharedString::from(format!("del-fld-{i}")))
+                .small()
                 .danger()
                 .label("刪除")
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -768,7 +802,8 @@ impl BatchSchedulerApp {
                                 .w_full()
                                 .gap_2()
                                 .child(labeled_input("欄位名稱", &row.label_input))
-                                .child(labeled_input("欄位 ID", &row.id_input)),
+                                .child(labeled_input("欄位 ID", &row.id_input))
+                                .child(labeled_input("自行輸入（優先，可用 {E1} 等變數）", &row.custom_input)),
                         ),
                 );
             } else {
@@ -776,7 +811,7 @@ impl BatchSchedulerApp {
                     h_flex()
                         .w_full()
                         .px_2()
-                        .py_1()
+                        .py_0p5()
                         .gap_2()
                         .items_center()
                         .bg(BACKGROUND)
@@ -790,9 +825,10 @@ impl BatchSchedulerApp {
                                 .text_color(MUTED_FOREGROUND)
                                 .child(format!("{}", i + 1)),
                         )
-                        .child(div().flex_1().min_w(px(120.)).child(Input::new(&row.label_input)))
-                        .child(div().flex_1().min_w(px(120.)).child(Input::new(&row.id_input)))
-                        .child(div().w(px(320.)).flex_shrink_0().child(pick_btn))
+                        .child(div().flex_1().min_w(px(120.)).child(Input::new(&row.label_input).small()))
+                        .child(div().flex_1().min_w(px(120.)).child(Input::new(&row.id_input).small()))
+                        .child(div().w(px(240.)).flex_shrink_0().child(pick_btn))
+                        .child(div().flex_1().min_w(px(200.)).child(Input::new(&row.custom_input).small()))
                         .child(
                             h_flex()
                                 .w(px(80.))
@@ -877,10 +913,17 @@ impl BatchSchedulerApp {
                     .gap_1()
                     .child(div().text_xl().font_weight(FontWeight::BOLD).child("批次程式新增"))
                     .child(
-                        div()
+                        v_flex()
+                            .w_full()
+                            .gap_0p5()
                             .text_sm()
                             .text_color(MUTED_FOREGROUND)
-                            .child("上方維護程式，選一支程式後，下方逐欄位選擇預設輸入值；有參數的欄位一定要選好預設輸入值才能儲存。"),
+                            .child("1. 上方維護程式；選一支程式後，下方逐欄位設定預設輸入值。")
+                            .child("2. 有參數的欄位一定要設定好才能儲存：從下拉選單選擇，或在「自行輸入」欄填寫（填寫時優先採用）。")
+                            .child("3. 自行輸入可混用文字與日期變數，例如：DAVDF222.{E1} → DAVDF222.1151127")
+                            .child("4. 常用變數：{E1} 執行日、{E2}~{E8} 前1~7天、{ED} 當月(YYYMM)、{EE} 前月(YYYMM)")
+                            .child("5. 其他變數：{MONTH_FIRST} 月初、{MONTH_LAST} 月底、{DAY_OFFSET:+1} 偏移天數")
+                            .child("6. 也可寫中文：{執行日當天}、{執行日前1天}、{執行日後3天}、{執行日前月}、{執行日前月第1日}（名稱同下拉選單）"),
                     ),
             )
             // 工作代號 / 工作名稱 + 新增 修改 匯入

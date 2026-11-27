@@ -137,21 +137,16 @@ impl BatchSchedulerApp {
         window.push_notification(Notification::success("已加入排程步驟"), cx);
     }
 
-    pub(super) fn add_program_with_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 把指定批次程式加入目前群組（預設：13:00、不勾前置工作序號、發送mail通知）。
+    /// 時間 / 前置工作序號 / 發送mail通知可在群組清單中再修改，按「儲存變更」寫入。
+    pub(super) fn add_program_with_options(
+        &mut self,
+        program_id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(gid) = self.selected_group.as_ref().and_then(|g| g.id) else {
             window.push_notification(Notification::error("請先建立或選取排程群組"), cx);
-            return;
-        };
-        let Some(program_id) = self.gs_selected_program else {
-            window.push_notification(Notification::error("請先選擇批次程式"), cx);
-            return;
-        };
-        let raw = self.gs_time_input.read(cx).value().trim().to_string();
-        let Some(time) = parse_hhmm(&raw) else {
-            window.push_notification(
-                Notification::error("預計執行時間格式須為 HH:MM（00:00～23:59）"),
-                cx,
-            );
             return;
         };
         let next_order = (self.group_items.len() + 1) as i32;
@@ -161,14 +156,14 @@ impl BatchSchedulerApp {
             program_id,
             step_order: next_order,
             expect_exe_date_rule: "GROUP_DATE".to_string(),
-            expect_exe_time: time,
+            expect_exe_time: "13:00".to_string(),
             req_op_confirm: false,
-            link_prev_sn: self.gs_link_prev,
+            link_prev_sn: false,
             pre_job_sn1: String::new(),
             pre_job_sn2: String::new(),
             pre_job_sn3: String::new(),
             rework_sn: String::new(),
-            req_email: self.gs_req_email,
+            req_email: true,
             mail_recipients: String::new(),
             pre_work_note: String::new(),
             rear_work_note: String::new(),
@@ -186,6 +181,55 @@ impl BatchSchedulerApp {
         }
         self.reload_groups(window, cx);
         window.push_notification(Notification::success("已加入群組"), cx);
+    }
+
+    /// 「群組內的批次程式」儲存變更：預計執行時間 / 前置工作序號 / 發送mail通知。成功回傳 true
+    pub(super) fn save_group_item_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let mut updates: Vec<GroupItem> = Vec::new();
+        for e in &self.gs_edits {
+            let Some(it) = self.group_items.iter().find(|i| i.id == Some(e.item_id)) else {
+                continue;
+            };
+            let raw = e.time_input.read(cx).value().trim().to_string();
+            let time = if raw.is_empty() {
+                String::new()
+            } else {
+                match parse_hhmm(&raw) {
+                    Some(t) => t,
+                    None => {
+                        window.push_notification(
+                            Notification::error("預計執行時間格式須為 HH:MM（00:00～23:59）"),
+                            cx,
+                        );
+                        return false;
+                    }
+                }
+            };
+            let mut n = it.clone();
+            n.expect_exe_time = time;
+            n.link_prev_sn = e.link_prev;
+            n.req_email = e.req_email;
+            updates.push(n);
+        }
+        {
+            let guard = self.conn.lock().unwrap();
+            let repo = Repository::new(&guard);
+            for n in &updates {
+                if let Err(e) = repo.update_group_item(n) {
+                    window.push_notification(
+                        Notification::error(format!("儲存變更失敗：{e}")),
+                        cx,
+                    );
+                    return false;
+                }
+            }
+        }
+        // 以資料庫內容重建編輯狀態（時間會被標準化為 HH:MM）
+        self.gs_edits.clear();
+        self.gs_edits_group = None;
+        self.reload_groups(window, cx);
+        window.push_notification(Notification::success("已儲存變更"), cx);
+        true
     }
 
     pub(super) fn move_group_item(
@@ -225,92 +269,77 @@ impl BatchSchedulerApp {
         })
     }
 
-    pub(super) fn toggle_exec_group(
-        &mut self,
-        gid: i64,
-        checked: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if checked {
-            if !self.exec_sel_groups.insert(gid) {
-                return;
+    /// 把群組內所有批次程式加入執行清單（雙擊群組列或按「加入執行清單」）
+    pub(super) fn add_exec_group(&mut self, gid: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let items = {
+            let guard = self.conn.lock().unwrap();
+            let repo = Repository::new(&guard);
+            repo.list_group_items(gid).unwrap_or_default()
+        };
+        if items.is_empty() {
+            window.push_notification(Notification::warning("此群組尚未加入批次程式"), cx);
+            return;
+        }
+        let mut skipped: Vec<String> = Vec::new();
+        let mut added = 0usize;
+        for it in items {
+            // 預設輸入值尚未設定完成的程式（待設定）不可排程
+            if self.program_pending(it.program_id) {
+                let code = self
+                    .programs
+                    .iter()
+                    .find(|p| p.id == Some(it.program_id))
+                    .map(|p| p.job_code.clone())
+                    .unwrap_or_else(|| "?".to_string());
+                skipped.push(code);
+                continue;
             }
-            let items = {
-                let guard = self.conn.lock().unwrap();
-                let repo = Repository::new(&guard);
-                repo.list_group_items(gid).unwrap_or_default()
-            };
-            let mut skipped: Vec<String> = Vec::new();
-            for it in items {
-                // 預設輸入值尚未設定完成的程式（待設定）不可排程
-                if self.program_pending(it.program_id) {
-                    let code = self
-                        .programs
-                        .iter()
-                        .find(|p| p.id == Some(it.program_id))
-                        .map(|p| p.job_code.clone())
-                        .unwrap_or_else(|| "?".to_string());
-                    skipped.push(code);
-                    continue;
-                }
-                let time_input = Self::new_exec_time_input(&it.expect_exe_time, window, cx);
-                self.exec_entries.push(ExecEntry {
-                    program_id: it.program_id,
-                    source_group: Some(gid),
-                    time_input,
-                    link_prev: it.link_prev_sn,
-                    req_email: it.req_email,
-                });
-            }
-            if !skipped.is_empty() {
-                window.push_notification(
-                    Notification::warning(format!(
-                        "下列程式的欄位尚未全部選好預設輸入值，未加入執行清單：{}",
-                        skipped.join("、")
-                    )),
-                    cx,
-                );
-            }
-        } else {
-            self.exec_sel_groups.remove(&gid);
-            self.exec_entries.retain(|e| e.source_group != Some(gid));
+            let time_input = Self::new_exec_time_input(&it.expect_exe_time, window, cx);
+            self.exec_entries.push(ExecEntry {
+                program_id: it.program_id,
+                source_group: Some(gid),
+                time_input,
+                link_prev: it.link_prev_sn,
+                req_email: it.req_email,
+            });
+            added += 1;
+        }
+        if !skipped.is_empty() {
+            window.push_notification(
+                Notification::warning(format!(
+                    "下列程式的欄位尚未全部選好預設輸入值，未加入執行清單：{}",
+                    skipped.join("、")
+                )),
+                cx,
+            );
+        }
+        if added > 0 {
+            window.push_notification(
+                Notification::success(format!("已加入執行清單（{added} 支程式）")),
+                cx,
+            );
         }
         cx.notify();
     }
 
-    pub(super) fn toggle_exec_program(
-        &mut self,
-        pid: i64,
-        checked: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if checked {
-            if self.program_pending(pid) {
-                window.push_notification(
-                    Notification::warning("此批次程式的欄位尚未全部選好預設輸入值，請先到「批次程式新增」設定"),
-                    cx,
-                );
-                cx.notify();
-                return;
-            }
-            if !self.exec_sel_programs.insert(pid) {
-                return;
-            }
-            let time_input = Self::new_exec_time_input("13:00", window, cx);
-            self.exec_entries.push(ExecEntry {
-                program_id: pid,
-                source_group: None,
-                time_input,
-                link_prev: false,
-                req_email: true,
-            });
-        } else {
-            self.exec_sel_programs.remove(&pid);
-            self.exec_entries
-                .retain(|e| !(e.source_group.is_none() && e.program_id == pid));
+    /// 把單一批次程式加入執行清單（雙擊程式列或按「加入執行清單」）
+    pub(super) fn add_exec_program(&mut self, pid: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.program_pending(pid) {
+            window.push_notification(
+                Notification::warning("此批次程式的欄位尚未全部選好預設輸入值，請先到「批次程式新增」設定"),
+                cx,
+            );
+            return;
         }
+        let time_input = Self::new_exec_time_input("13:00", window, cx);
+        self.exec_entries.push(ExecEntry {
+            program_id: pid,
+            source_group: None,
+            time_input,
+            link_prev: false,
+            req_email: true,
+        });
+        window.push_notification(Notification::success("已加入執行清單"), cx);
         cx.notify();
     }
 
@@ -330,10 +359,7 @@ impl BatchSchedulerApp {
 
     pub(super) fn remove_exec_entry(&mut self, idx: usize, cx: &mut Context<Self>) {
         if idx < self.exec_entries.len() {
-            let e = self.exec_entries.remove(idx);
-            if e.source_group.is_none() {
-                self.exec_sel_programs.remove(&e.program_id);
-            }
+            self.exec_entries.remove(idx);
             cx.notify();
         }
     }

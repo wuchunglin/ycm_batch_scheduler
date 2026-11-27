@@ -48,7 +48,7 @@ impl BatchSchedulerApp {
                     .w_full()
                     .items_start()
                     .gap_1()
-                    .child(div().text_xl().font_weight(FontWeight::BOLD).child("設定"))
+                    .child(div().text_xl().font_weight(FontWeight::BOLD).child("參數設定"))
                     .child(
                         div()
                             .text_sm()

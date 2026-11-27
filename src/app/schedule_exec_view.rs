@@ -69,38 +69,56 @@ impl BatchSchedulerApp {
 
             let g_edit = g.clone();
             let g_del = g.clone();
+            let picked = self.exec_pick_group == Some(gid);
             group_rows = group_rows.child(
                 h_flex()
+                    .id(SharedString::from(format!("sx-grow-{gid}")))
                     .w_full()
                     .px_3()
-                    .py_2()
+                    .py_1()
                     .gap_2()
                     .text_size(px(14.))
                     .items_center()
-                    .bg(BACKGROUND)
+                    .bg(if picked { SECONDARY } else { BACKGROUND })
                     .rounded_md()
                     .border_1()
-                    .border_color(BORDER)
+                    .border_color(if picked { PRIMARY } else { BORDER })
+                    .hover(|s| s.bg(SECONDARY))
+                    // 單擊選取、雙擊加入執行清單
                     .child(
-                        Checkbox::new(SharedString::from(format!("sx-gchk-{gid}")))
-                            .checked(self.exec_sel_groups.contains(&gid))
-                            .on_click(cx.listener(move |this, checked, window, cx| {
-                                this.toggle_exec_group(gid, *checked, window, cx);
-                            })),
-                    )
-                    .child(info)
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_size(px(14.))
-                            .text_color(MUTED_FOREGROUND)
-                            .child(format!("{} 支程式", items.len())),
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .items_center()
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                    this.exec_pick_group = Some(gid);
+                                    if ev.click_count == 2 {
+                                        this.add_exec_group(gid, window, cx);
+                                    }
+                                    cx.notify();
+                                }),
+                            )
+                            .child(info)
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(14.))
+                                    .text_color(MUTED_FOREGROUND)
+                                    .child(format!("{} 支程式", items.len())),
+                            ),
                     )
                     .child(
                         Button::new(SharedString::from(format!("sx-edit-{gid}")))
+                            .small()
                             .label("設定群組")
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 this.selected_group = Some(g_edit.clone());
+                                this.gs_edits.clear();
+                                this.gs_edits_group = None;
                                 this.reload_groups(window, cx);
                                 this.active_tab = NavTab::GroupSetup;
                                 cx.notify();
@@ -108,14 +126,17 @@ impl BatchSchedulerApp {
                     )
                     .child(
                         Button::new(SharedString::from(format!("sx-del-{gid}")))
+                            .small()
                             .danger()
                             .label("刪除")
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 this.selected_group = Some(g_del.clone());
                                 this.delete_selected_group(window, cx);
                                 if let Some(did) = g_del.id {
-                                    this.exec_sel_groups.remove(&did);
                                     this.exec_entries.retain(|e| e.source_group != Some(did));
+                                    if this.exec_pick_group == Some(did) {
+                                        this.exec_pick_group = None;
+                                    }
                                 }
                             })),
                     ),
@@ -136,25 +157,32 @@ impl BatchSchedulerApp {
             let pid = p.id.unwrap_or(0);
             let (field_count, _) = self.prog_stats.get(&pid).copied().unwrap_or((0, 0));
             let pending = self.program_pending(pid);
+            let picked = self.exec_pick_program == Some(pid);
             prog_rows = prog_rows.child(
                 h_flex()
+                    .id(SharedString::from(format!("sx-prow-{pid}")))
                     .w_full()
                     .px_3()
-                    .py_1()
+                    .py_0p5()
                     .gap_2()
                     .text_size(px(14.))
                     .items_center()
-                    .bg(BACKGROUND)
+                    .bg(if picked { SECONDARY } else { BACKGROUND })
                     .rounded_md()
                     .border_1()
-                    .border_color(BORDER)
-                    .child(
-                        Checkbox::new(SharedString::from(format!("sx-pchk-{pid}")))
-                            .checked(self.exec_sel_programs.contains(&pid))
-                            .disabled(pending)
-                            .on_click(cx.listener(move |this, checked, window, cx| {
-                                this.toggle_exec_program(pid, *checked, window, cx);
-                            })),
+                    .border_color(if picked { PRIMARY } else { BORDER })
+                    .hover(|s| s.bg(SECONDARY))
+                    .cursor_pointer()
+                    // 單擊選取、雙擊加入執行清單
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                            this.exec_pick_program = Some(pid);
+                            if ev.click_count == 2 {
+                                this.add_exec_program(pid, window, cx);
+                            }
+                            cx.notify();
+                        }),
                     )
                     .child(
                         div()
@@ -174,14 +202,14 @@ impl BatchSchedulerApp {
             );
         }
 
-        // ---- 執行清單（由上方勾選的群組 / 批次程式帶入，可調整順序） ----
+        // ---- 執行清單（由上方雙擊或按「加入執行清單」帶入，可調整順序） ----
         let mut exec_rows = v_flex().w_full().gap_1();
         if self.exec_entries.is_empty() {
             exec_rows = exec_rows.child(
                 div()
                     .text_size(px(14.))
                     .text_color(MUTED_FOREGROUND)
-                    .child("請勾選上方的群組或批次程式，會列示在此"),
+                    .child("請雙擊上方的群組或批次程式（或按「加入執行清單」），會列示在此"),
             );
         }
         for (idx, e) in self.exec_entries.iter().enumerate() {
@@ -189,23 +217,11 @@ impl BatchSchedulerApp {
                 .get(&e.program_id)
                 .map(|p| (p.job_code.clone(), p.job_name.clone()))
                 .unwrap_or_else(|| ("?".to_string(), "（程式已刪除）".to_string()));
-            let source = match e.source_group {
-                Some(gid) => {
-                    let gname = self
-                        .groups
-                        .iter()
-                        .find(|g| g.id == Some(gid))
-                        .map(|g| g.group_name.clone())
-                        .unwrap_or_default();
-                    format!("來自群組：{gname}")
-                }
-                None => "單獨選取".to_string(),
-            };
             exec_rows = exec_rows.child(
                 h_flex()
                     .w_full()
                     .px_3()
-                    .py_2()
+                    .py_1()
                     .gap_3()
                     .text_size(px(14.))
                     .flex_wrap()
@@ -222,16 +238,11 @@ impl BatchSchedulerApp {
                             .child(format!("{}", idx + 1)),
                     )
                     .child(
-                        v_flex()
+                        div()
                             .flex_1()
                             .min_w(px(180.))
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(format!("{}　{}", code, name)),
-                            )
-                            .child(div().text_size(px(14.)).text_color(MUTED_FOREGROUND).child(source)),
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("{}　{}", code, name)),
                     )
                     .child(
                         h_flex()
@@ -307,6 +318,7 @@ impl BatchSchedulerApp {
                             .gap_0()
                             .child(
                                 Button::new(SharedString::from(format!("ex-up-{idx}")))
+                                    .small()
                                     .ghost()
                                     .w(px(30.))
                                     .label("▲")
@@ -316,6 +328,7 @@ impl BatchSchedulerApp {
                             )
                             .child(
                                 Button::new(SharedString::from(format!("ex-down-{idx}")))
+                                    .small()
                                     .ghost()
                                     .w(px(30.))
                                     .label("▼")
@@ -326,6 +339,7 @@ impl BatchSchedulerApp {
                     )
                     .child(
                         Button::new(SharedString::from(format!("ex-rm-{idx}")))
+                            .small()
                             .danger()
                             .label("移除")
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -365,7 +379,7 @@ impl BatchSchedulerApp {
                         div()
                             .text_sm()
                             .text_color(MUTED_FOREGROUND)
-                            .child("群組清單與批次程式清單；按「新增群組」或群組的「設定群組」進入群組設定畫面。"),
+                            .child("群組清單與批次程式清單：雙擊或按「加入執行清單」加入下方執行清單；按「新增群組」或群組的「設定群組」進入群組設定畫面。"),
                     ),
             )
             .child(
@@ -381,6 +395,24 @@ impl BatchSchedulerApp {
                                     .child(format!("群組清單（{}）", self.groups.len())),
                             )
                             .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        Button::new("sx-add-group")
+                                            .primary()
+                                            .label("加入執行清單")
+                                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                                match this.exec_pick_group {
+                                                    Some(gid) => this.add_exec_group(gid, window, cx),
+                                                    None => window.push_notification(
+                                                        Notification::warning("請先點選要加入的群組（或直接雙擊）"),
+                                                        cx,
+                                                    ),
+                                                }
+                                            })),
+                                    )
+                                    .child(
                                 Button::new("sx-new-group")
                                     .primary()
                                     .label("新增群組")
@@ -391,6 +423,7 @@ impl BatchSchedulerApp {
                                         this.active_tab = NavTab::GroupSetup;
                                         cx.notify();
                                     })),
+                                    ),
                             ),
                     )
                     .child(group_rows),
@@ -398,9 +431,29 @@ impl BatchSchedulerApp {
             .child(
                 card()
                     .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("批次程式清單（{}）", self.programs.len())),
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(format!("批次程式清單（{}）", self.programs.len())),
+                            )
+                            .child(
+                                Button::new("sx-add-prog")
+                                    .primary()
+                                    .label("加入執行清單")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        match this.exec_pick_program {
+                                            Some(pid) => this.add_exec_program(pid, window, cx),
+                                            None => window.push_notification(
+                                                Notification::warning("請先點選要加入的批次程式（或直接雙擊）"),
+                                                cx,
+                                            ),
+                                        }
+                                    })),
+                            ),
                     )
                     .child(prog_rows),
             )
@@ -421,7 +474,7 @@ impl BatchSchedulerApp {
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                     if this.exec_entries.is_empty() {
                                         window.push_notification(
-                                            Notification::warning("執行清單是空的，請先勾選群組或批次程式"),
+                                            Notification::warning("執行清單是空的，請先雙擊或按「加入執行清單」加入群組或批次程式"),
                                             cx,
                                         );
                                         return;
@@ -452,6 +505,9 @@ impl BatchSchedulerApp {
                                     this.exec_reviewed.insert(0);
                                     this.exec_console_mode = false;
                                     this.exec_cal_open = None;
+                                    this.exec_param_overrides.clear();
+                                    this.exec_param_rows.clear();
+                                    this.exec_param_dirty = true;
                                     this.active_tab = NavTab::ExecPreview;
                                     cx.notify();
                                 })),

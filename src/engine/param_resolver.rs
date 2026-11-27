@@ -308,10 +308,48 @@ impl ParamResolver {
         result
     }
 
+    /// 中文別名：{執行日當天}、{執行日前1天}、{執行日後3天}、{執行日前月}、{執行日前月第1日} ...
+    /// 名稱與「預設輸入值」下拉選單一致（可省略括號內的範例）。
+    fn resolve_alias(&self, token: &str) -> Option<String> {
+        let t: String = token.chars().filter(|c| !c.is_whitespace()).collect();
+        let key = t.strip_prefix("執行日")?;
+        let v = match key {
+            "" | "當天" => self.resolve("E1", ""),
+            "當月" => self.resolve("ED", ""),
+            "前月" => self.resolve("EE", ""),
+            "前月第1日" => self.resolve_month_edge("PREV_MONTH_FIRST"),
+            "前月最後1日" => self.resolve_month_edge("PREV_MONTH_LAST"),
+            "當月第1日" | "本月第1日" => self.resolve_month_edge("MONTH_FIRST"),
+            "當月最後1日" | "本月最後1日" => self.resolve_month_edge("MONTH_LAST"),
+            "前1季第1日" => self.resolve_date_edge("PREV_QUARTER_FIRST"),
+            "前1季最後1日" => self.resolve_date_edge("PREV_QUARTER_LAST"),
+            "前半年第1日" => self.resolve_date_edge("PREV_HALF_FIRST"),
+            "前半年最後1日" => self.resolve_date_edge("PREV_HALF_LAST"),
+            "本年第1日" => self.resolve_date_edge("YEAR_FIRST"),
+            "本年最後1日" => self.resolve_date_edge("YEAR_LAST"),
+            _ => {
+                let (sign, rest) = if let Some(r) = key.strip_prefix("前") {
+                    ("-", r)
+                } else if let Some(r) = key.strip_prefix("後") {
+                    ("+", r)
+                } else {
+                    return None;
+                };
+                let n: i64 = rest.strip_suffix("天")?.parse().ok()?;
+                self.resolve_day_offset(&format!("{sign}{n}"))
+            }
+        };
+        Some(v)
+    }
+
     /// Resolves an individual token inside `{...}`
     fn resolve_token(&self, token: &str) -> String {
         let trimmed = token.trim();
         let upper = trimmed.to_uppercase();
+
+        if let Some(v) = self.resolve_alias(trimmed) {
+            return v;
+        }
 
         // Generic monthly dictionary lookup: {MONTH_MAIL} looks up MONTH_MAIL_<MM> in custom_variables
         if upper == "MONTH_MAIL" {

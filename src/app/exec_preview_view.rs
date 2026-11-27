@@ -6,6 +6,7 @@ use chrono::{Datelike, NaiveDate};
 
 /// 預覽頁一列參數（不顯示欄位 ID）
 struct ParamPreviewRow {
+    field_id: i64,
     label: String,
     /// 「批次程式新增」下拉式選單選的預設輸入值名稱
     default_name: String,
@@ -94,7 +95,7 @@ impl BatchSchedulerApp {
     }
 
     /// 由畫面上的排程條件組出 ScheduleRule，並展開成實際排程日期（民國年）
-    fn exec_generated_dates(&self, cx: &Context<Self>) -> Vec<GeneratedScheduleItem> {
+    pub(super) fn exec_generated_dates(&self, cx: &Context<Self>) -> Vec<GeneratedScheduleItem> {
         let (years, range_mode) = match self.exec_year {
             Some(y) => (vec![y], DateRangeMode::AllYear),
             None => {
@@ -166,18 +167,17 @@ impl BatchSchedulerApp {
                 .and_then(|did| self.default_values.iter().find(|d| d.id == Some(*did)));
             rows.push(match dv {
                 Some(d) => ParamPreviewRow {
+                    field_id: fid,
                     label: f.label,
                     default_name: d.name.clone(),
-                    resolved: {
-                        let v = resolver.resolve(&d.rule_code, &d.rule_value);
-                        if v.is_empty() { "（空白）".to_string() } else { v }
-                    },
+                    resolved: resolver.resolve(&d.rule_code, &d.rule_value),
                     configured: true,
                 },
                 None => ParamPreviewRow {
+                    field_id: fid,
                     label: f.label,
                     default_name: "（未設定）".into(),
-                    resolved: "（尚未設定）".into(),
+                    resolved: String::new(),
                     configured: false,
                 },
             });
@@ -220,7 +220,75 @@ impl BatchSchedulerApp {
         (true, String::new())
     }
 
-    fn exec_select_date(&mut self, idx: usize, cx: &mut Context<Self>) {
+    /// 依目前選取的日期重建各執行項目的可修改參數輸入框（已修改過的值會帶回）
+    pub(super) fn rebuild_exec_param_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dates = self.exec_generated_dates(cx);
+        let sel = self.exec_preview_date_idx.min(dates.len().saturating_sub(1));
+        let (date_key, base_date) = match dates.get(sel) {
+            Some(d) => (
+                d.roc_date_raw.clone(),
+                RocDateUtils::parse_roc_date(&d.roc_date_raw)
+                    .unwrap_or_else(|| Local::now().date_naive()),
+            ),
+            None => (String::new(), Local::now().date_naive()),
+        };
+        let resolver = ParamResolver::new(base_date).with_custom_vars(
+            self.custom_variables
+                .iter()
+                .map(|v| (v.var_key.clone(), v.var_value.clone()))
+                .collect(),
+        );
+        let mut all: Vec<Vec<ExecParamRow>> = Vec::new();
+        for e in self.exec_entries.iter() {
+            let mut rows = Vec::new();
+            for p in self.exec_entry_params(e, &resolver) {
+                let key = (date_key.clone(), e.program_id, p.field_id);
+                let init = self
+                    .exec_param_overrides
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| p.resolved.clone());
+                let input = cx.new(|cx| InputState::new(window, cx).default_value(init));
+                rows.push(ExecParamRow {
+                    field_id: p.field_id,
+                    label: p.label,
+                    default_name: p.default_name,
+                    configured: p.configured,
+                    resolved: p.resolved,
+                    input,
+                });
+            }
+            all.push(rows);
+        }
+        self.exec_param_rows = all;
+        self.exec_param_date = date_key;
+    }
+
+    /// 把目前輸入框的內容與原轉換值比對，不同者記為該日期的手動修改
+    pub(super) fn harvest_exec_param_overrides(&mut self, cx: &mut Context<Self>) {
+        if self.exec_param_date.is_empty() {
+            return;
+        }
+        let date = self.exec_param_date.clone();
+        for (e, rows) in self.exec_entries.iter().zip(self.exec_param_rows.iter()) {
+            for r in rows {
+                if !r.configured {
+                    continue;
+                }
+                let v = r.input.read(cx).value().to_string();
+                let key = (date.clone(), e.program_id, r.field_id);
+                if v == r.resolved {
+                    self.exec_param_overrides.remove(&key);
+                } else {
+                    self.exec_param_overrides.insert(key, v);
+                }
+            }
+        }
+    }
+
+    pub(super) fn exec_select_date(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.harvest_exec_param_overrides(cx);
+        self.exec_param_dirty = true;
         self.exec_preview_overview = false;
         self.exec_preview_date_idx = idx;
         self.exec_reviewed.insert(idx);
@@ -247,6 +315,7 @@ impl BatchSchedulerApp {
         if self.runner_state.is_running {
             return;
         }
+        self.harvest_exec_param_overrides(cx);
         let dates = self.exec_generated_dates(cx);
         let (ok, msg) = self.exec_start_gate(dates.len(), cx);
         if !ok {
@@ -338,6 +407,7 @@ impl BatchSchedulerApp {
             steps,
             schedule_dates: dates.clone(),
             custom_vars,
+            param_overrides: self.exec_param_overrides.clone(),
         };
 
         // 排程 log：開始時先記錄整份排程（日期、程式、時間），之後每步由執行引擎寫入同一個 log 檔
@@ -461,6 +531,7 @@ impl BatchSchedulerApp {
                         Button::new("ep-back")
                             .label("上一步")
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.harvest_exec_param_overrides(cx);
                                 this.active_tab = NavTab::ScheduleExec;
                                 cx.notify();
                             })),
@@ -499,6 +570,8 @@ impl BatchSchedulerApp {
             overview,
             None,
             cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.harvest_exec_param_overrides(cx);
+                this.exec_param_dirty = true;
                 this.exec_preview_overview = true;
                 cx.notify();
             }),
@@ -631,12 +704,6 @@ impl BatchSchedulerApp {
                 .get(sel_idx)
                 .and_then(|d| RocDateUtils::parse_roc_date(&d.roc_date))
                 .unwrap_or_else(|| Local::now().date_naive());
-            let resolver = ParamResolver::new(base_date).with_custom_vars(
-                self.custom_variables
-                    .iter()
-                    .map(|v| (v.var_key.clone(), v.var_value.clone()))
-                    .collect(),
-            );
             let base_txt = RocDateUtils::to_roc_yyymmdd(&base_date, "/");
             body = body.child(
                 h_flex()
@@ -667,7 +734,11 @@ impl BatchSchedulerApp {
                     .map(|p| (p.job_code.clone(), p.job_name.clone()))
                     .unwrap_or_else(|| ("?".to_string(), "（程式已刪除）".to_string()));
                 let time = self.entry_time_text(e, cx);
-                let params = self.exec_entry_params(e, &resolver);
+                let params: &[ExecParamRow] = self
+                    .exec_param_rows
+                    .get(idx)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
 
                 let mut table = v_flex().w_full().gap_1().child(
                     h_flex()
@@ -680,7 +751,8 @@ impl BatchSchedulerApp {
                         .text_color(MUTED_FOREGROUND)
                         .child(div().flex_1().min_w(px(120.)).child("欄位名稱"))
                         .child(div().w(px(280.)).flex_shrink_0().child("預設輸入值"))
-                        .child(div().flex_1().min_w(px(120.)).child("轉換後參數值")),
+                        .child(div().flex_1().min_w(px(120.)).child("轉換後參數值（可直接修改）"))
+                        .child(div().w(px(60.)).flex_shrink_0()),
                 );
                 if params.is_empty() {
                     // 無參數：顯示「無參數」，轉換後參數值空白
@@ -704,10 +776,14 @@ impl BatchSchedulerApp {
                                     .child("無參數"),
                             )
                             .child(div().w(px(280.)).flex_shrink_0())
-                            .child(div().flex_1().min_w(px(120.))),
+                            .child(div().flex_1().min_w(px(120.)))
+                            .child(div().w(px(60.)).flex_shrink_0()),
                     );
                 }
-                for p in params {
+                for (ri, p) in params.iter().enumerate() {
+                    let modified = p.configured && p.input.read(cx).value().to_string() != p.resolved;
+                    let reset_input = p.input.clone();
+                    let reset_to = p.resolved.clone();
                     table = table.child(
                         h_flex()
                             .w_full()
@@ -720,20 +796,43 @@ impl BatchSchedulerApp {
                             .rounded_md()
                             .border_1()
                             .border_color(BORDER)
-                            .child(div().flex_1().min_w(px(120.)).child(p.label))
+                            .child(div().flex_1().min_w(px(120.)).child(p.label.clone()))
                             .child(
                                 div()
                                     .w(px(280.))
                                     .flex_shrink_0()
                                     .text_color(if p.configured { FOREGROUND } else { DANGER })
-                                    .child(p.default_name),
+                                    .child(p.default_name.clone()),
                             )
-                            .child(
+                            .child(if p.configured {
                                 div()
                                     .flex_1()
                                     .min_w(px(120.))
-                                    .text_color(if p.configured { SUCCESS } else { DANGER })
-                                    .child(p.resolved),
+                                    .child(Input::new(&p.input))
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .flex_1()
+                                    .min_w(px(120.))
+                                    .text_color(DANGER)
+                                    .child("（尚未設定）")
+                                    .into_any_element()
+                            })
+                            .child(
+                                div().w(px(60.)).flex_shrink_0().child(if modified {
+                                    Button::new(SharedString::from(format!("ep-reset-{idx}-{ri}")))
+                                        .ghost()
+                                        .label("還原")
+                                        .on_click(cx.listener(move |_, _: &ClickEvent, window, cx| {
+                                            reset_input.update(cx, |s, cx| {
+                                                s.set_value(reset_to.clone(), window, cx)
+                                            });
+                                            cx.notify();
+                                        }))
+                                        .into_any_element()
+                                } else {
+                                    div().into_any_element()
+                                }),
                             ),
                     );
                 }
@@ -788,8 +887,11 @@ impl BatchSchedulerApp {
         let done_dates = curr / per;
         let n_dates = self.exec_run_dates.len();
 
+        let cancelled = rs.cancelled;
         let (title, title_color) = if running {
-            ("排程執行中", WARNING)
+            (if self.interrupt_requested { "中斷中" } else { "排程執行中" }, WARNING)
+        } else if cancelled {
+            ("已中斷", WARNING)
         } else if failed {
             ("執行失敗", DANGER)
         } else {
@@ -825,25 +927,46 @@ impl BatchSchedulerApp {
                             .text_sm()
                             .text_color(MUTED_FOREGROUND)
                             .child(if running {
-                                "執行中，已鎖住所有頁籤，請等待執行完成（請勿關閉程式）"
+                                "執行中，已鎖住所有頁籤，請等待執行完成，或按「中斷」停止（請勿關閉程式）"
+                            } else if cancelled {
+                                "已依要求中斷，後續排程未執行，可返回排程設定"
                             } else {
                                 "執行已結束，可返回排程設定"
                             }),
                     ),
             )
             .child(
-                Button::new("ec-back")
-                    .primary()
-                    .label("返回排程設定")
-                    .disabled(running)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        if this.runner_state.is_running {
-                            return;
-                        }
-                        this.exec_console_mode = false;
-                        this.active_tab = NavTab::ScheduleExec;
-                        cx.notify();
-                    })),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(if running {
+                        Button::new("ec-interrupt")
+                            .danger()
+                            .label(if self.interrupt_requested { "中斷中..." } else { "中斷" })
+                            .disabled(self.interrupt_requested)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                // 先跳出確認視窗，確認後才真的中斷
+                                this.interrupt_prompt = true;
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    })
+                    .child(
+                        Button::new("ec-back")
+                            .primary()
+                            .label("返回排程設定")
+                            .disabled(running)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if this.runner_state.is_running {
+                                    return;
+                                }
+                                this.exec_console_mode = false;
+                                this.active_tab = NavTab::ScheduleExec;
+                                cx.notify();
+                            })),
+                    ),
             );
 
         let progress = v_flex()
@@ -886,6 +1009,8 @@ impl BatchSchedulerApp {
         for (i, label) in self.exec_run_dates.iter().enumerate() {
             let (icon, color) = if i < done_dates {
                 ("✓", Some(SUCCESS))
+            } else if i == done_dates && cancelled {
+                ("■", Some(WARNING))
             } else if i == done_dates && failed {
                 ("✗", Some(DANGER))
             } else if i == done_dates && running {

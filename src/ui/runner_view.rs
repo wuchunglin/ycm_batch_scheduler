@@ -19,6 +19,8 @@ pub struct RunnerViewState {
     /// 每個排程日期要跑幾支程式（用來由進度推算目前日期）
     pub steps_per_date: usize,
     pub failed: bool,
+    /// 使用者中斷執行
+    pub cancelled: bool,
 }
 
 impl Default for RunnerViewState {
@@ -35,6 +37,7 @@ impl Default for RunnerViewState {
             log_dates: vec![0, 0],
             steps_per_date: 0,
             failed: false,
+            cancelled: false,
         }
     }
 }
@@ -87,6 +90,12 @@ impl RunnerViewState {
                 self.push_log(format!(
                     "[DONE] 所有排程批次皆已順利執行完成（共 {total_executed} 筆）"
                 ));
+            }
+            RunnerEvent::Cancelled => {
+                self.is_running = false;
+                self.cancelled = true;
+                self.current_step = "已中斷".to_string();
+                self.push_log("[WARN] 使用者已中斷執行，後續排程不再執行".to_string());
             }
             RunnerEvent::Failed { error } => {
                 self.is_running = false;

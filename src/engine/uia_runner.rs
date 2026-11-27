@@ -45,8 +45,8 @@ mod win_uia {
     };
 
     use crate::engine::browser_runner::{
-        append_file_log, emit_log, emit_status, resolve_step_date, ExecutionRequest,
-        ExecutionStepInput, RunnerEvent,
+        append_file_log, emit_log, emit_status, is_cancelled, resolve_step_date,
+        ExecutionRequest, ExecutionStepInput, RunnerEvent, CANCEL_MSG,
     };
     use crate::engine::param_resolver::{ParamResolver, RocDateUtils};
     use crate::models::GeneratedScheduleItem;
@@ -85,6 +85,15 @@ mod win_uia {
     /// 正式執行：填完參數後點 F8 送出。
     fn submit_f8(req: &ExecutionRequest) -> bool {
         !req.config.dry_run
+    }
+
+    /// 使用者按下「中斷」後，在步驟與等待迴圈中丟出中斷錯誤，讓流程盡快停止
+    fn check_cancel() -> Result<()> {
+        if is_cancelled() {
+            Err(anyhow!(CANCEL_MSG))
+        } else {
+            Ok(())
+        }
     }
 
     struct UiaSession {
@@ -329,6 +338,10 @@ mod win_uia {
                 Ok(completed)
             }
             Err(err) => {
+                if is_cancelled() || err.to_string().contains(CANCEL_MSG) {
+                    emit_log(tx, "WARN", "已依使用者要求中斷，Edge 視窗保持開啟供檢視");
+                    return Err(err);
+                }
                 emit_log(
                     tx,
                     "WARN",
@@ -370,6 +383,7 @@ mod win_uia {
             let mut is_first_batch = true;
 
             for sched in &req.schedule_dates {
+                check_cancel()?;
                 let base_date = RocDateUtils::parse_roc_date(&sched.roc_date_raw)
                     .unwrap_or_else(|| Local::now().date_naive());
                 let resolver = ParamResolver::new(base_date).with_custom_vars(req.custom_vars.clone());
@@ -397,7 +411,7 @@ mod win_uia {
                     "填寫參數",
                     format!("填寫 {} ({})", step.program.job_code, sched.roc_date),
                 );
-                fill_step_fields_uia(s, &resolver, step, sched, None)?;
+                fill_step_fields_uia(s, &resolver, step, sched, None, &req.param_overrides, req.config.dry_run)?;
 
                 if !do_f8 {
                     completed += 1;
@@ -457,6 +471,7 @@ mod win_uia {
                 let mut prev_sn: Option<String> = None;
 
                 for step in &req.steps {
+                    check_cancel()?;
                     emit_status(
                         tx,
                         "查詢程式",
@@ -477,7 +492,17 @@ mod win_uia {
                         "填寫參數",
                         format!("填寫 {} ({})", step.program.job_code, sched.roc_date),
                     );
-                    fill_step_fields_uia(s, &resolver, step, sched, prev_sn.as_deref())?;
+                    if req.config.dry_run && step.item.link_prev_sn && prev_sn.is_none() {
+                        emit_log(
+                            tx,
+                            "INFO",
+                            format!(
+                                "預演模式：{} 勾選前置工作序號，預演不送出 F8、無上一步序號，略過前置序號欄位",
+                                step.program.job_code
+                            ),
+                        );
+                    }
+                    fill_step_fields_uia(s, &resolver, step, sched, prev_sn.as_deref(), &req.param_overrides, req.config.dry_run)?;
 
                     if !do_f8 {
                         completed += 1;
@@ -593,6 +618,7 @@ mod win_uia {
 
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
+            check_cancel()?;
             if let Ok(el) = find_by_id(s, "jobCodeNumber") {
                 if get_element_text(s, &el).trim() == job_code {
                     return Ok(());
@@ -610,12 +636,19 @@ mod win_uia {
         step: &ExecutionStepInput,
         sched: &GeneratedScheduleItem,
         prev_sn: Option<&str>,
+        overrides: &std::collections::HashMap<(String, i64, i64), String>,
+        dry_run: bool,
     ) -> Result<()> {
         for param in &step.params {
-            if !param.is_configured && param.rule_value.is_empty() {
-                continue;
-            }
-            let val = resolver.resolve(&param.rule_code, &param.rule_value);
+            let key = (sched.roc_date_raw.clone(), step.program.id.unwrap_or(0), param.field_id);
+            let val = if let Some(v) = overrides.get(&key) {
+                v.clone()
+            } else {
+                if !param.is_configured && param.rule_value.is_empty() {
+                    continue;
+                }
+                resolver.resolve(&param.rule_code, &param.rule_value)
+            };
             set_id_value(s, &param.html_id, &val)?;
         }
 
@@ -628,14 +661,17 @@ mod win_uia {
         }
 
         let pre1 = if step.item.link_prev_sn {
-            prev_sn
-                .ok_or_else(|| {
-                    anyhow!(
+            match prev_sn {
+                Some(v) => v.to_string(),
+                // 預演模式不會點 F8，沒有上一步序號是正常的：略過前置序號，不當作錯誤
+                None if dry_run => String::new(),
+                None => {
+                    return Err(anyhow!(
                         "步驟 {} 需要前置序號，但上一步序號為空",
                         step.program.job_code
-                    )
-                })?
-                .to_string()
+                    ))
+                }
+            }
         } else {
             step.item.pre_job_sn1.clone()
         };
@@ -759,6 +795,7 @@ mod win_uia {
     ) -> Result<()> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
+            check_cancel()?;
             refresh_root(s);
             if let Some(who) = detect_logged_in(s) {
                 log_logged_in(tx, &who);
@@ -797,6 +834,7 @@ mod win_uia {
         let mut pin_el: Option<IUIAutomationElement> = None;
 
         while start.elapsed() < detect_timeout {
+            check_cancel()?;
             attempt += 1;
             refresh_root(s);
 
@@ -1104,6 +1142,7 @@ mod win_uia {
     fn wait_enabled_id(s: &UiaSession, id: &str, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
+            check_cancel()?;
             if let Ok(el) = find_by_id(s, id) {
                 if unsafe { el.CurrentIsEnabled() }.map(|b| b.as_bool()).unwrap_or(false) {
                     return Ok(());
@@ -1222,6 +1261,7 @@ mod win_uia {
     ) -> Result<IUIAutomationElement> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
+            check_cancel()?;
             if let Ok(grid) = find_by_id(s, "SampleGrid") {
                 if let Ok(rows) = collect_table_rows(s, &grid) {
                     if rows.len() >= 2 {
@@ -1239,6 +1279,24 @@ mod win_uia {
         set_element_value(s, &el, value)
     }
 
+    /// 比對輸入值：忽略前後空白，以及頁面可能自動套用的格式字元（/ - : , 與空白）、大小寫
+    fn value_matches(cur: &str, want: &str) -> bool {
+        fn norm(v: &str) -> String {
+            v.chars()
+                .filter(|c| !c.is_whitespace() && !matches!(c, '/' | '-' | ':' | ','))
+                .flat_map(|c| c.to_lowercase())
+                .collect()
+        }
+        cur.trim() == want.trim() || norm(cur) == norm(want)
+    }
+
+    fn read_element_value(el: &IUIAutomationElement) -> Option<String> {
+        let vp = unsafe { el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) }.ok()?;
+        unsafe { vp.CurrentValue() }.ok().map(|b| b.to_string())
+    }
+
+    /// 輸入欄位值：第 1 次輸入後讀回欄位值比對，相符就結束，不會再輸入第 2 次；
+    /// 只有讀回值與目標值不符（或欄位不支援 ValuePattern）才改用鍵盤輸入。
     fn set_element_value(
         s: &UiaSession,
         el: &IUIAutomationElement,
@@ -1247,17 +1305,27 @@ mod win_uia {
         s.focus_edge();
         let _ = unsafe { el.SetFocus() };
 
+        // 欄位已經是目標值 → 不需要再輸入
+        if let Some(cur) = read_element_value(el) {
+            if value_matches(&cur, value) {
+                return Ok(());
+            }
+        }
+
         if let Ok(vp) = unsafe { el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) } {
-            if unsafe { vp.SetValue(&BSTR::from(value)) }.is_ok() {
+            let _ = unsafe { vp.SetValue(&BSTR::from(value)) };
+            // 第 1 次輸入後讀回比對（網頁可能稍後才更新或自動格式化，所以短暫重試讀取）
+            for _ in 0..5 {
+                thread::sleep(Duration::from_millis(80));
                 if let Ok(curr) = unsafe { vp.CurrentValue() } {
-                    if curr.to_string() == value {
+                    if value_matches(&curr.to_string(), value) {
                         return Ok(());
                     }
                 }
             }
         }
 
-        // Fallback: click inside control, select all, backspace, and type Unicode text via SendInput
+        // 讀回值仍不相符（或不支援 ValuePattern）：改用滑鼠點選 + 鍵盤輸入
         click_uia_element(s, el)?;
         thread::sleep(Duration::from_millis(80));
         send_ctrl_key(0x41); // Ctrl+A
@@ -1374,6 +1442,7 @@ mod win_uia {
         let re = Regex::new(r"\d+")?;
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
+            check_cancel()?;
             if let Ok(el) = find_by_id(s, "OpMsg") {
                 let text = get_element_text(s, &el);
                 if text.contains("新增成功") || text.contains("成功") {
